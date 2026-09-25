@@ -379,7 +379,7 @@ def render_login_page(users: dict[str, str]) -> None:
 
     with center_column:
         st.markdown(
-            '<div class="login-title">📦 Стикеры WB FBS</div>',
+            '<div class="login-title">📦 FBZ</div>',
             unsafe_allow_html=True,
         )
 
