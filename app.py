@@ -148,11 +148,6 @@ def apply_styles() -> None:
                 border-radius: 14px;
                 box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
             }
-
-            .article-row {
-                border-bottom: 1px solid #E5E7EB;
-                padding: 8px 0;
-            }
         </style>
         """,
         unsafe_allow_html=True,
@@ -637,8 +632,9 @@ def render_results(result: dict) -> None:
     st.subheader("📄 Общий файл")
 
     st.caption(
-        "Общий PDF содержит стикеры всех артикулов подряд: "
-        "сначала первый артикул, затем второй и так далее."
+        "Перед каждой группой, включая первую, печатается служебная "
+        "этикетка с крупным артикулом и количеством стикеров. "
+        "После неё идут оригинальные стикеры WB этого артикула."
     )
 
     timestamp = datetime.now(MOSCOW_TZ).strftime("%Y%m%d_%H%M%S")
@@ -656,8 +652,8 @@ def render_results(result: dict) -> None:
 
     st.caption(
         "Артикулы идут в том же порядке, что и таблица выше. "
-        "По умолчанию сначала отображаются группы с наибольшим "
-        "количеством стикеров."
+        "В PDF отдельного артикула содержатся только оригинальные "
+        "стикеры WB, без служебной этикетки-разделителя."
     )
 
     article_pdf_by_name = dict(result["article_pdfs"])
@@ -700,14 +696,10 @@ def render_results(result: dict) -> None:
             st.markdown(f"`{article}`")
 
         with stickers_col:
-            st.markdown(
-                f"**{len(group['order_ids'])}**"
-            )
+            st.markdown(f"**{len(group['order_ids'])}**")
 
         with supplies_col:
-            st.markdown(
-                f"**{group['supply_count']}**"
-            )
+            st.markdown(f"**{group['supply_count']}**")
 
         with open_col:
             render_open_pdf_button(
@@ -738,9 +730,9 @@ def render_main_page(client: WBClient) -> None:
         <div class="description-box">
             Выберите несколько поставок WB. Приложение найдёт одинаковые
             артикулы в разных поставках и сформирует оригинальные стикеры
-            WB группами: сначала все стикеры одного артикула, затем другого.
-            Приложение не создаёт поставки, не изменяет статусы заказов,
-            не управляет коробами и не печатает ярлыки поставок.
+            WB группами: сначала служебная этикетка с артикулом, затем все
+            стикеры этого артикула. Поставки, статусы заказов и короба
+            приложение не изменяет.
         </div>
         """,
         unsafe_allow_html=True,
@@ -1083,12 +1075,15 @@ def render_main_page(client: WBClient) -> None:
                     sticker_height=sticker_height,
                 )
 
+                # Общий PDF: перед каждой группой печатается разделитель.
                 full_pdf = make_pdf(
                     groups=summary["groups"],
                     width_mm=sticker_width,
                     height_mm=sticker_height,
+                    include_group_separators=True,
                 )
 
+                # PDF одного артикула: только оригинальные стикеры WB.
                 article_pdfs: list[tuple[str, bytes]] = []
 
                 for group in summary["groups"]:
@@ -1096,6 +1091,7 @@ def render_main_page(client: WBClient) -> None:
                         groups=[group],
                         width_mm=sticker_width,
                         height_mm=sticker_height,
+                        include_group_separators=False,
                     )
 
                     article_pdfs.append(
