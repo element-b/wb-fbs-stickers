@@ -37,8 +37,8 @@ st.set_page_config(
 # СТИЛИ
 # ============================================================
 
-def apply_styles() -> None:
-    """Применяет стили интерфейса приложения."""
+def apply_main_styles() -> None:
+    """Основные стили авторизованной части приложения."""
     st.markdown(
         """
         <style>
@@ -48,8 +48,8 @@ def apply_styles() -> None:
             }
 
             .main .block-container {
-                max-width: 1450px;
                 padding: 2rem 3rem 3rem 3rem;
+                max-width: 1450px;
             }
 
             .stApp h1,
@@ -57,6 +57,12 @@ def apply_styles() -> None:
             .stApp h3 {
                 color: #000000 !important;
                 font-weight: 650;
+            }
+
+            .stApp p,
+            .stApp span,
+            .stApp div {
+                color: #000000;
             }
 
             section[data-testid="stSidebar"] {
@@ -78,11 +84,13 @@ def apply_styles() -> None:
                 padding: 11px 14px;
                 font-size: 15px;
                 font-weight: 500;
+                transition: all 0.2s ease-in-out;
             }
 
             section[data-testid="stSidebar"] .stButton > button:hover {
                 background-color: #202020;
                 border-color: #777777;
+                transform: translateX(2px);
             }
 
             .stButton > button {
@@ -92,6 +100,7 @@ def apply_styles() -> None:
                 border-radius: 7px;
                 padding: 9px 16px;
                 font-weight: 600;
+                transition: all 0.2s ease-in-out;
             }
 
             .stButton > button:hover {
@@ -99,18 +108,19 @@ def apply_styles() -> None:
                 box-shadow: 0 3px 10px rgba(0, 155, 119, 0.28);
             }
 
-            .stDownloadButton > button {
-                width: 100%;
-                background-color: #009B77 !important;
-                color: #FFFFFF !important;
-                border: none !important;
-                border-radius: 7px !important;
-                padding: 10px 16px !important;
-                font-weight: 600 !important;
+            div[data-testid="stVerticalBlockBorderWrapper"] {
+                border: 1px solid #E4E4E7 !important;
+                border-radius: 12px !important;
+                background-color: #FAFAFA !important;
             }
 
-            .stDownloadButton > button:hover {
-                background-color: #008268 !important;
+            .description-box {
+                border-left: 4px solid #009B77;
+                background: #F2FBF7;
+                border-radius: 6px;
+                padding: 14px 18px;
+                margin-bottom: 24px;
+                color: #1F2937;
             }
 
             div[data-testid="metric-container"] {
@@ -130,23 +140,121 @@ def apply_styles() -> None:
                 color: #444444 !important;
             }
 
-            .description-box {
-                border-left: 4px solid #009B77;
-                background: #F2FBF7;
-                border-radius: 6px;
-                padding: 14px 18px;
-                margin-bottom: 24px;
-                color: #1F2937;
+            .stDownloadButton > button {
+                width: 100%;
+                background-color: #009B77 !important;
+                color: #FFFFFF !important;
+                border: none !important;
+                border-radius: 7px !important;
+                padding: 10px 16px !important;
+                font-weight: 600 !important;
             }
 
-            .login-card {
-                max-width: 430px;
-                margin: 7rem auto 0 auto;
-                padding: 2rem;
-                background: #FFFFFF;
-                border: 1px solid #E5E7EB;
+            .stDownloadButton > button:hover {
+                background-color: #008268 !important;
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def apply_login_styles() -> None:
+    """
+    Стили страницы входа.
+
+    Оформление повторяет страницу авторизации проекта
+    «Контроль поставок Ozon».
+    """
+    st.markdown(
+        """
+        <style>
+            header[data-testid="stHeader"],
+            section[data-testid="stSidebar"] {
+                display: none !important;
+            }
+
+            .stApp {
+                background:
+                    radial-gradient(
+                        circle at top left,
+                        rgba(80, 200, 120, 0.16),
+                        transparent 35%
+                    ),
+                    radial-gradient(
+                        circle at bottom right,
+                        rgba(0, 155, 119, 0.12),
+                        transparent 38%
+                    ),
+                    linear-gradient(
+                        135deg,
+                        #0B0915 0%,
+                        #151226 55%,
+                        #0B1220 100%
+                    );
+            }
+
+            .main .block-container {
+                padding: 0 !important;
+                max-width: 100% !important;
+            }
+
+            div[data-testid="stForm"] {
+                background-color: rgba(21, 18, 38, 0.96);
+                padding: 2.5rem;
                 border-radius: 14px;
-                box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+                border: 1px solid rgba(255, 255, 255, 0.09);
+                box-shadow: 0 18px 48px rgba(0, 0, 0, 0.4);
+            }
+
+            div[data-testid="stForm"] input {
+                background-color: #151226 !important;
+                border: 1px solid #34304B !important;
+                color: #FFFFFF !important;
+                border-radius: 7px !important;
+            }
+
+            div[data-testid="stForm"] input::placeholder {
+                color: #A4A1B4 !important;
+            }
+
+            div[data-testid="stForm"] .stFormSubmitButton > button {
+                width: 100%;
+                background-color: transparent !important;
+                color: #50C878 !important;
+                border: 2px solid #50C878 !important;
+                border-radius: 8px !important;
+                padding: 11px !important;
+                font-weight: 650 !important;
+                transition: all 0.25s ease-in-out !important;
+            }
+
+            div[data-testid="stForm"] .stFormSubmitButton > button:hover {
+                background-color: #50C878 !important;
+                color: #FFFFFF !important;
+                border-color: #50C878 !important;
+                box-shadow: 0 5px 18px rgba(80, 200, 120, 0.35) !important;
+                transform: translateY(-1px);
+            }
+
+            div[data-testid="stForm"] .stFormSubmitButton > button:focus-visible {
+                outline: 3px solid rgba(80, 200, 120, 0.45) !important;
+                outline-offset: 3px;
+            }
+
+            .login-title {
+                color: #FFFFFF !important;
+                text-align: center;
+                font-size: 1.9rem;
+                font-weight: 700;
+                margin-bottom: 0.55rem;
+            }
+
+            .login-subtitle {
+                color: #C7C5D5 !important;
+                text-align: center;
+                font-size: 0.96rem;
+                margin-bottom: 1.8rem;
             }
         </style>
         """,
@@ -173,7 +281,12 @@ def init_session_state() -> None:
 
 
 def invalidate_result() -> None:
-    """Удаляет сформированные PDF из памяти текущей сессии."""
+    """
+    Удаляет старые сформированные PDF из памяти текущей сессии.
+
+    После изменения выбранных поставок, размера стикера или периода
+    поиска нельзя продолжать использовать предыдущий файл.
+    """
     st.session_state["result"] = None
 
 
@@ -182,7 +295,14 @@ def invalidate_result() -> None:
 # ============================================================
 
 def get_users() -> dict[str, str]:
-    """Читает пользователей из Streamlit Secrets."""
+    """
+    Читает пользователей из Streamlit Secrets.
+
+    Ожидаемый формат Secrets:
+
+    [users]
+    kladovshik = "ваш-пароль"
+    """
     try:
         configured_users = st.secrets["users"]
     except Exception:
@@ -250,52 +370,75 @@ def authenticate(
 
 
 def render_login_page(users: dict[str, str]) -> None:
-    """Отображает страницу входа."""
-    st.markdown('<div class="login-card">', unsafe_allow_html=True)
+    """Отображает страницу входа в стиле проекта Ozon."""
+    apply_login_styles()
 
-    st.title("📦 WB FBS")
-    st.caption("Группировка и печать стикеров сборочных заданий.")
+    st.markdown("<br><br><br><br>", unsafe_allow_html=True)
 
-    with st.form("login_form", clear_on_submit=False):
-        username = st.text_input(
-            "Логин",
-            autocomplete="username",
+    _, center_column, _ = st.columns([1, 1.05, 1])
+
+    with center_column:
+        st.markdown(
+            '<div class="login-title">📦 Стикеры WB FBS</div>',
+            unsafe_allow_html=True,
         )
 
-        password = st.text_input(
-            "Пароль",
-            type="password",
-            autocomplete="current-password",
+        st.markdown(
+            (
+                '<div class="login-subtitle">'
+                'Группировка и печать стикеров сборочных заданий'
+                '</div>'
+            ),
+            unsafe_allow_html=True,
         )
 
-        submitted = st.form_submit_button(
-            "Войти",
-            type="primary",
-            use_container_width=True,
-        )
+        with st.form("login_form", clear_on_submit=False):
+            username = st.text_input(
+                "Логин",
+                placeholder="Логин",
+                autocomplete="username",
+                label_visibility="collapsed",
+            )
 
-    if submitted:
-        if authenticate(username, password, users):
-            st.session_state["authenticated"] = True
-            st.rerun()
-        else:
-            st.error("Неверный логин или пароль.")
+            password = st.text_input(
+                "Пароль",
+                placeholder="Пароль",
+                type="password",
+                autocomplete="current-password",
+                label_visibility="collapsed",
+            )
 
-    st.markdown("</div>", unsafe_allow_html=True)
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            submitted = st.form_submit_button(
+                "Войти",
+                use_container_width=True,
+            )
+
+            if submitted:
+                if authenticate(username, password, users):
+                    st.session_state["authenticated"] = True
+                    st.rerun()
+                else:
+                    st.error("Неверный логин или пароль.")
 
 
 def logout() -> None:
-    """Выходит из приложения и очищает данные сессии."""
+    """Выходит из приложения и очищает данные текущей сессии."""
     st.session_state.clear()
     st.rerun()
 
 
 # ============================================================
-# ПОСТАВКИ И ФИЛЬТРЫ
+# РАБОТА СО СПИСКОМ ПОСТАВОК И ФИЛЬТРАМИ
 # ============================================================
 
 def parse_created_at(value: object) -> datetime | None:
-    """Преобразует `createdAt` WB в дату и время Europe/Moscow."""
+    """
+    Преобразует поле WB `createdAt` в дату/время Europe/Moscow.
+
+    Если WB передаёт дату без часовой зоны, она трактуется как UTC.
+    """
     if not isinstance(value, str) or not value.strip():
         return None
 
@@ -314,7 +457,7 @@ def parse_created_at(value: object) -> datetime | None:
 
 
 def supply_is_done(supply: dict) -> bool:
-    """Проверяет признак завершённой поставки WB."""
+    """Возвращает признак завершённой поставки по полю WB `done`."""
     value = supply.get("done", False)
 
     if isinstance(value, bool):
@@ -324,7 +467,7 @@ def supply_is_done(supply: dict) -> bool:
 
 
 def format_supply_label(supply: dict) -> str:
-    """Формирует подпись поставки в поле выбора."""
+    """Создаёт подпись поставки для списка выбора."""
     supply_id = str(supply.get("id", "")).strip()
     name = str(supply.get("name") or "Без названия").strip()
 
@@ -349,7 +492,11 @@ def supply_matches_filters(
     period_days: int | None,
     status_filter: str,
 ) -> bool:
-    """Проверяет, должна ли поставка отображаться в списке."""
+    """
+    Проверяет, должна ли поставка быть видна в списке.
+
+    Фильтры применяются к уже загруженному списку, без новых запросов к WB.
+    """
     if status_filter == "Только активные" and supply_is_done(supply):
         return False
 
@@ -389,7 +536,7 @@ def sort_supply_ids(
     supply_ids: list[str],
     supply_by_id: dict[str, dict],
 ) -> list[str]:
-    """Сортирует поставки: новые сверху."""
+    """Сортирует поставки: сначала новые, потом по названию и ID."""
     def sort_key(supply_id: str) -> tuple[float, str, str]:
         supply = supply_by_id[supply_id]
         created_at = parse_created_at(supply.get("createdAt"))
@@ -450,11 +597,15 @@ def render_sidebar() -> None:
 
 
 # ============================================================
-# РЕЗУЛЬТАТЫ И PDF
+# РЕЗУЛЬТАТЫ: ТАБЛИЦА АРТИКУЛОВ И PDF
 # ============================================================
 
 def build_article_table(summary: dict) -> pd.DataFrame:
-    """Строит таблицу: одна строка — один артикул продавца."""
+    """
+    Строит итоговую таблицу.
+
+    Одна строка — один точный артикул продавца WB.
+    """
     rows = []
 
     for group in summary["groups"]:
@@ -470,7 +621,12 @@ def build_article_table(summary: dict) -> pd.DataFrame:
 
 
 def render_results(result: dict) -> None:
-    """Показывает результаты формирования и ссылки на PDF."""
+    """
+    Показывает сводку по артикулам и ссылки на PDF.
+
+    По умолчанию артикулы сортируются от большего количества стикеров
+    к меньшему. Нижний блок отдельных PDF использует такой же порядок.
+    """
     summary = result["summary"]
 
     st.divider()
@@ -834,7 +990,6 @@ def render_main_page(client: WBClient) -> None:
     )
 
     today = datetime.now(MOSCOW_TZ).date()
-
     today_ids = []
 
     for supply_id, supply in supply_by_id.items():
@@ -1053,7 +1208,7 @@ def render_main_page(client: WBClient) -> None:
                 )
 
                 # PDF отдельного артикула:
-                # тоже начинается со служебной этикетки.
+                # также начинается со служебной этикетки.
                 article_pdfs: list[tuple[str, bytes]] = []
 
                 for group in summary["groups"]:
@@ -1103,8 +1258,7 @@ def render_main_page(client: WBClient) -> None:
 # ============================================================
 
 def main() -> None:
-    """Запускает приложение."""
-    apply_styles()
+    """Запускает приложение и выбирает экран входа или рабочий экран."""
     init_session_state()
 
     users = get_users()
@@ -1112,6 +1266,8 @@ def main() -> None:
     if not st.session_state["authenticated"]:
         render_login_page(users)
         st.stop()
+
+    apply_main_styles()
 
     try:
         token = str(st.secrets["WB_API_TOKEN"]).strip()
