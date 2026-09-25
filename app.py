@@ -34,40 +34,11 @@ st.set_page_config(
 
 
 # ============================================================
-# SESSION STATE
-# ============================================================
-
-def init_session_state() -> None:
-    """Создаёт начальные переменные текущей пользовательской сессии."""
-    defaults = {
-        "authenticated": False,
-        "auth_display_name": None,
-        "supplies": None,
-        "result": None,
-        "supply_widget_version": 0,
-    }
-
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
-
-
-def invalidate_result() -> None:
-    """
-    Удаляет ранее сформированные PDF из текущей сессии.
-
-    После изменения поставок или параметров формирования нельзя
-    продолжать использовать предыдущие файлы.
-    """
-    st.session_state["result"] = None
-
-
-# ============================================================
 # СТИЛИ
 # ============================================================
 
-def apply_main_styles() -> None:
-    """Стили авторизованной части приложения."""
+def apply_styles() -> None:
+    """Применяет стили интерфейса приложения."""
     st.markdown(
         """
         <style>
@@ -107,13 +78,11 @@ def apply_main_styles() -> None:
                 padding: 11px 14px;
                 font-size: 15px;
                 font-weight: 500;
-                transition: all 0.2s ease-in-out;
             }
 
             section[data-testid="stSidebar"] .stButton > button:hover {
                 background-color: #202020;
                 border-color: #777777;
-                transform: translateX(2px);
             }
 
             .stButton > button {
@@ -123,7 +92,6 @@ def apply_main_styles() -> None:
                 border-radius: 7px;
                 padding: 9px 16px;
                 font-weight: 600;
-                transition: all 0.2s ease-in-out;
             }
 
             .stButton > button:hover {
@@ -170,191 +138,102 @@ def apply_main_styles() -> None:
                 margin-bottom: 24px;
                 color: #1F2937;
             }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
 
-
-def apply_login_styles() -> None:
-    """Стили страницы входа по образцу проекта Ozon."""
-    st.markdown(
-        """
-        <style>
-            header[data-testid="stHeader"],
-            section[data-testid="stSidebar"] {
-                display: none !important;
-            }
-
-            .stApp {
-                background:
-                    radial-gradient(
-                        circle at top left,
-                        rgba(80, 200, 120, 0.16),
-                        transparent 35%
-                    ),
-                    radial-gradient(
-                        circle at bottom right,
-                        rgba(0, 155, 119, 0.12),
-                        transparent 38%
-                    ),
-                    linear-gradient(
-                        135deg,
-                        #0B0915 0%,
-                        #151226 55%,
-                        #0B1220 100%
-                    );
-            }
-
-            .main .block-container {
-                padding: 0 !important;
-                max-width: 100% !important;
-            }
-
-            div[data-testid="stForm"] {
-                background-color: rgba(21, 18, 38, 0.96);
-                padding: 2.5rem;
+            .login-card {
+                max-width: 430px;
+                margin: 7rem auto 0 auto;
+                padding: 2rem;
+                background: #FFFFFF;
+                border: 1px solid #E5E7EB;
                 border-radius: 14px;
-                border: 1px solid rgba(255, 255, 255, 0.09);
-                box-shadow: 0 18px 48px rgba(0, 0, 0, 0.4);
-            }
-
-            div[data-testid="stForm"] input {
-                background-color: #151226 !important;
-                border: 1px solid #34304B !important;
-                color: #FFFFFF !important;
-                border-radius: 7px !important;
-            }
-
-            div[data-testid="stForm"] input::placeholder {
-                color: #A4A1B4 !important;
-            }
-
-            div[data-testid="stForm"] .stFormSubmitButton > button {
-                width: 100%;
-                background-color: transparent !important;
-                color: #50C878 !important;
-                border: 2px solid #50C878 !important;
-                border-radius: 8px !important;
-                padding: 11px !important;
-                font-weight: 650 !important;
-                transition: all 0.25s ease-in-out !important;
-            }
-
-            div[data-testid="stForm"] .stFormSubmitButton > button:hover {
-                background-color: #50C878 !important;
-                color: #FFFFFF !important;
-                border-color: #50C878 !important;
-                box-shadow: 0 5px 18px rgba(80, 200, 120, 0.35) !important;
-                transform: translateY(-1px);
-            }
-
-            div[data-testid="stForm"]
-            .stFormSubmitButton > button:focus-visible {
-                outline: 3px solid rgba(80, 200, 120, 0.45) !important;
-                outline-offset: 3px;
-            }
-
-            .login-title {
-                color: #FFFFFF !important;
-                text-align: center;
-                font-size: 1.9rem;
-                font-weight: 700;
-                margin-bottom: 1.8rem;
+                box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
             }
         </style>
         """,
         unsafe_allow_html=True,
     )
+
+
+# ============================================================
+# SESSION STATE
+# ============================================================
+
+def init_session_state() -> None:
+    """Создаёт начальные переменные текущей пользовательской сессии."""
+    defaults = {
+        "authenticated": False,
+        "supplies": None,
+        "result": None,
+        "supply_widget_version": 0,
+    }
+
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+def invalidate_result() -> None:
+    """Удаляет сформированные PDF из памяти текущей сессии."""
+    st.session_state["result"] = None
 
 
 # ============================================================
 # АВТОРИЗАЦИЯ
 # ============================================================
 
-def get_auth_settings() -> dict:
-    """
-    Читает настройки авторизации из Streamlit Secrets.
-
-    Основной формат, аналогичный проекту Ozon:
-
-    AUTH_USERNAME = "operator"
-    AUTH_PASSWORD = "ваш-пароль"
-    AUTH_DISPLAY_NAME = "Оператор"
-
-    Для совместимости также поддерживается прежний формат:
-
-    [users]
-    kladovshik = "ваш-пароль"
-
-    Если настроены оба формата, используются AUTH_USERNAME
-    и AUTH_PASSWORD.
-    """
+def get_users() -> dict[str, str]:
+    """Читает пользователей из Streamlit Secrets."""
     try:
-        secrets = st.secrets
+        configured_users = st.secrets["users"]
+    except Exception:
+        st.error(
+            "Не настроены пользователи. Добавьте таблицу `[users]` "
+            "в Streamlit Secrets."
+        )
+        st.stop()
 
-        if "AUTH_USERNAME" in secrets or "AUTH_PASSWORD" in secrets:
-            username = str(secrets.get("AUTH_USERNAME", "")).strip()
-            password = str(secrets.get("AUTH_PASSWORD", ""))
-
-            if not username or not password:
-                return {}
-
-            display_name = str(
-                secrets.get("AUTH_DISPLAY_NAME", "Пользователь")
-            ).strip() or "Пользователь"
-
-            return {
-                "users": {username: password},
-                "display_names": {username: display_name},
-            }
-
-        configured_users = secrets.get("users")
-
-        if configured_users is None:
-            return {}
-
+    try:
         users = {
-            str(username).strip(): str(password)
+            str(username): str(password)
             for username, password in configured_users.items()
         }
-
-        if not users or any(
-            not username or not password
-            for username, password in users.items()
-        ):
-            return {}
-
-        return {
-            "users": users,
-            "display_names": {
-                username: username
-                for username in users
-            },
-        }
-
     except Exception:
-        return {}
+        st.error(
+            "Таблица `[users]` в Streamlit Secrets настроена некорректно."
+        )
+        st.stop()
+
+    if not users:
+        st.error("В таблице `[users]` нет ни одного пользователя.")
+        st.stop()
+
+    empty_credentials = [
+        username
+        for username, password in users.items()
+        if not username.strip() or not password
+    ]
+
+    if empty_credentials:
+        st.error(
+            "У одного или нескольких пользователей в Secrets указан "
+            "пустой логин или пароль."
+        )
+        st.stop()
+
+    return users
 
 
 def authenticate(
     username: str,
     password: str,
-    auth_settings: dict,
-) -> str | None:
-    """
-    Проверяет логин и пароль.
+    users: dict[str, str],
+) -> bool:
+    """Проверяет логин и пароль из формы."""
+    matched = False
 
-    Возвращает отображаемое имя при успешном входе, иначе None.
-    """
-    entered_username = username.strip()
-    matched_username = None
-
-    for configured_username, configured_password in (
-        auth_settings["users"].items()
-    ):
+    for configured_username, configured_password in users.items():
         username_matches = hmac.compare_digest(
-            entered_username,
+            username,
             configured_username,
         )
 
@@ -363,91 +242,60 @@ def authenticate(
             configured_password,
         )
 
-        if username_matches and password_matches:
-            matched_username = configured_username
-
-    if matched_username is None:
-        return None
-
-    return auth_settings["display_names"][matched_username]
-
-
-def render_login_page(auth_settings: dict) -> None:
-    """Отображает страницу авторизации."""
-    apply_login_styles()
-
-    st.markdown("<br><br><br><br>", unsafe_allow_html=True)
-
-    _, center_column, _ = st.columns([1, 1.05, 1])
-
-    with center_column:
-        st.markdown(
-            '<div class="login-title">📦 Стикеры WB FBS</div>',
-            unsafe_allow_html=True,
+        matched = matched or (
+            username_matches and password_matches
         )
 
-        if not auth_settings:
-            st.error(
-                "Авторизация ещё не настроена. Добавьте "
-                "`AUTH_USERNAME` и `AUTH_PASSWORD` в Streamlit Secrets "
-                "либо настройте таблицу `[users]`."
-            )
-            st.stop()
+    return matched
 
-        with st.form("login_form", clear_on_submit=False):
-            username = st.text_input(
-                "Логин",
-                placeholder="Логин",
-                autocomplete="username",
-                label_visibility="collapsed",
-            )
 
-            password = st.text_input(
-                "Пароль",
-                placeholder="Пароль",
-                type="password",
-                autocomplete="current-password",
-                label_visibility="collapsed",
-            )
+def render_login_page(users: dict[str, str]) -> None:
+    """Отображает страницу входа."""
+    st.markdown('<div class="login-card">', unsafe_allow_html=True)
 
-            st.markdown("<br>", unsafe_allow_html=True)
+    st.title("📦 WB FBS")
+    st.caption("Группировка и печать стикеров сборочных заданий.")
 
-            submitted = st.form_submit_button(
-                "Войти",
-                use_container_width=True,
-            )
+    with st.form("login_form", clear_on_submit=False):
+        username = st.text_input(
+            "Логин",
+            autocomplete="username",
+        )
 
-            if submitted:
-                display_name = authenticate(
-                    username,
-                    password,
-                    auth_settings,
-                )
+        password = st.text_input(
+            "Пароль",
+            type="password",
+            autocomplete="current-password",
+        )
 
-                if display_name is not None:
-                    st.session_state["authenticated"] = True
-                    st.session_state["auth_display_name"] = display_name
-                    st.rerun()
-                else:
-                    st.error("Неверный логин или пароль.")
+        submitted = st.form_submit_button(
+            "Войти",
+            type="primary",
+            use_container_width=True,
+        )
+
+    if submitted:
+        if authenticate(username, password, users):
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Неверный логин или пароль.")
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def logout() -> None:
-    """Выходит из приложения и очищает данные текущей сессии."""
+    """Выходит из приложения и очищает данные сессии."""
     st.session_state.clear()
     st.rerun()
 
 
 # ============================================================
-# РАБОТА СО СПИСКОМ ПОСТАВОК И ФИЛЬТРАМИ
+# ПОСТАВКИ И ФИЛЬТРЫ
 # ============================================================
 
 def parse_created_at(value: object) -> datetime | None:
-    """
-    Преобразует поле WB `createdAt` в дату и время Europe/Moscow.
-
-    Если WB передаёт дату без часовой зоны, она трактуется как UTC.
-    """
+    """Преобразует `createdAt` WB в дату и время Europe/Moscow."""
     if not isinstance(value, str) or not value.strip():
         return None
 
@@ -466,7 +314,7 @@ def parse_created_at(value: object) -> datetime | None:
 
 
 def supply_is_done(supply: dict) -> bool:
-    """Возвращает признак завершённой поставки по полю WB `done`."""
+    """Проверяет признак завершённой поставки WB."""
     value = supply.get("done", False)
 
     if isinstance(value, bool):
@@ -476,7 +324,7 @@ def supply_is_done(supply: dict) -> bool:
 
 
 def format_supply_label(supply: dict) -> str:
-    """Создаёт подпись поставки для списка выбора."""
+    """Формирует подпись поставки в поле выбора."""
     supply_id = str(supply.get("id", "")).strip()
     name = str(supply.get("name") or "Без названия").strip()
 
@@ -501,11 +349,7 @@ def supply_matches_filters(
     period_days: int | None,
     status_filter: str,
 ) -> bool:
-    """
-    Проверяет, должна ли поставка быть видна в списке.
-
-    Фильтры применяются к уже загруженному списку, без новых запросов к WB.
-    """
+    """Проверяет, должна ли поставка отображаться в списке."""
     if status_filter == "Только активные" and supply_is_done(supply):
         return False
 
@@ -545,7 +389,7 @@ def sort_supply_ids(
     supply_ids: list[str],
     supply_by_id: dict[str, dict],
 ) -> list[str]:
-    """Сортирует поставки: сначала новые, потом по названию и ID."""
+    """Сортирует поставки: новые сверху."""
     def sort_key(supply_id: str) -> tuple[float, str, str]:
         supply = supply_by_id[supply_id]
         created_at = parse_created_at(supply.get("createdAt"))
@@ -573,14 +417,6 @@ def render_sidebar() -> None:
     """Отображает боковую панель приложения."""
     with st.sidebar:
         st.markdown("## 📦 WB FBS")
-
-        display_name = (
-            st.session_state.get("auth_display_name")
-            or "Пользователь"
-        )
-        st.markdown("**Пользователь**")
-        st.write(display_name)
-
         st.caption("Стикеры сборочных заданий")
         st.caption(
             "Приложение не меняет поставки, заказы, статусы и короба."
@@ -592,18 +428,17 @@ def render_sidebar() -> None:
         st.markdown(
             """
             1. Обновите список поставок WB.
-            2. Установите нужный фильтр.
+            2. Установите фильтр.
             3. Выберите поставки.
             4. Сформируйте файлы.
-            5. Откройте PDF нужного артикула в новой вкладке.
+            5. Откройте PDF нужного артикула.
             """
         )
 
         st.divider()
 
         st.caption(
-            "Стикеры и PDF существуют только в памяти "
-            "текущей сессии браузера."
+            "Стикеры и PDF существуют только в памяти текущей сессии."
         )
 
         if st.button(
@@ -615,15 +450,11 @@ def render_sidebar() -> None:
 
 
 # ============================================================
-# РЕЗУЛЬТАТЫ: ТАБЛИЦА АРТИКУЛОВ И PDF
+# РЕЗУЛЬТАТЫ И PDF
 # ============================================================
 
 def build_article_table(summary: dict) -> pd.DataFrame:
-    """
-    Строит итоговую таблицу.
-
-    Одна строка — один точный артикул продавца WB.
-    """
+    """Строит таблицу: одна строка — один артикул продавца."""
     rows = []
 
     for group in summary["groups"]:
@@ -639,12 +470,7 @@ def build_article_table(summary: dict) -> pd.DataFrame:
 
 
 def render_results(result: dict) -> None:
-    """
-    Показывает сводку по артикулам и ссылки на PDF.
-
-    По умолчанию артикулы сортируются от большего количества стикеров
-    к меньшему. Нижний блок отдельных PDF использует такой же порядок.
-    """
+    """Показывает результаты формирования и ссылки на PDF."""
     summary = result["summary"]
 
     st.divider()
@@ -777,8 +603,8 @@ def render_results(result: dict) -> None:
 
     st.caption(
         "Перед каждой группой, включая первую, печатается служебная "
-        "этикетка с крупным артикулом и количеством стикеров. "
-        "После неё идут оригинальные стикеры WB этого артикула."
+        "этикетка с артикулом и количеством стикеров. После неё идут "
+        "оригинальные стикеры WB."
     )
 
     timestamp = datetime.now(MOSCOW_TZ).strftime("%Y%m%d_%H%M%S")
@@ -795,9 +621,8 @@ def render_results(result: dict) -> None:
     st.subheader("🔗 Стикеры по отдельным артикулам")
 
     st.caption(
-        "Артикулы идут в том же порядке, что и таблица выше. "
-        "В PDF отдельного артикула содержатся только оригинальные "
-        "стикеры WB, без служебной этикетки-разделителя."
+        "PDF каждого отдельного артикула также начинается со служебной "
+        "этикетки с артикулом и количеством стикеров."
     )
 
     article_pdf_by_name = dict(result["article_pdfs"])
@@ -1009,6 +834,7 @@ def render_main_page(client: WBClient) -> None:
     )
 
     today = datetime.now(MOSCOW_TZ).date()
+
     today_ids = []
 
     for supply_id, supply in supply_by_id.items():
@@ -1218,7 +1044,7 @@ def render_main_page(client: WBClient) -> None:
                     sticker_height=sticker_height,
                 )
 
-                # Общий PDF: перед каждой группой печатается разделитель.
+                # Общий PDF: разделитель перед каждой группой.
                 full_pdf = make_pdf(
                     groups=summary["groups"],
                     width_mm=sticker_width,
@@ -1226,7 +1052,8 @@ def render_main_page(client: WBClient) -> None:
                     include_group_separators=True,
                 )
 
-                # PDF одного артикула: только оригинальные стикеры WB.
+                # PDF отдельного артикула:
+                # тоже начинается со служебной этикетки.
                 article_pdfs: list[tuple[str, bytes]] = []
 
                 for group in summary["groups"]:
@@ -1234,7 +1061,7 @@ def render_main_page(client: WBClient) -> None:
                         groups=[group],
                         width_mm=sticker_width,
                         height_mm=sticker_height,
-                        include_group_separators=False,
+                        include_group_separators=True,
                     )
 
                     article_pdfs.append(
@@ -1277,15 +1104,14 @@ def render_main_page(client: WBClient) -> None:
 
 def main() -> None:
     """Запускает приложение."""
+    apply_styles()
     init_session_state()
 
-    auth_settings = get_auth_settings()
+    users = get_users()
 
     if not st.session_state["authenticated"]:
-        render_login_page(auth_settings)
+        render_login_page(users)
         st.stop()
-
-    apply_main_styles()
 
     try:
         token = str(st.secrets["WB_API_TOKEN"]).strip()
@@ -1298,6 +1124,7 @@ def main() -> None:
         st.stop()
 
     client = WBClient(token=token)
+
     render_main_page(client)
 
 
