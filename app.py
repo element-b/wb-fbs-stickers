@@ -148,6 +148,11 @@ def apply_styles() -> None:
                 border-radius: 14px;
                 box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
             }
+
+            .article-row {
+                border-bottom: 1px solid #E5E7EB;
+                padding: 8px 0;
+            }
         </style>
         """,
         unsafe_allow_html=True,
@@ -176,8 +181,8 @@ def invalidate_result() -> None:
     """
     Удаляет старые сформированные PDF из памяти текущей сессии.
 
-    После изменения списка поставок, размера этикетки или периода
-    поиска заданий нельзя продолжать скачивать прежний файл.
+    После изменения выбранных поставок, размера стикера или периода
+    поиска нельзя продолжать использовать предыдущий файл.
     """
     st.session_state["result"] = None
 
@@ -240,11 +245,7 @@ def authenticate(
     password: str,
     users: dict[str, str],
 ) -> bool:
-    """
-    Сравнивает введённые логин и пароль с Secrets.
-
-    Все пары проверяются полностью, без раннего выхода из цикла.
-    """
+    """Проверяет логин и пароль из формы."""
     matched = False
 
     for configured_username, configured_password in users.items():
@@ -314,7 +315,7 @@ def parse_created_at(value: object) -> datetime | None:
     """
     Преобразует поле WB `createdAt` в дату/время Europe/Moscow.
 
-    Если API вернёт дату без часовой зоны, она трактуется как UTC.
+    Если WB передаёт дату без часовой зоны, она трактуется как UTC.
     """
     if not isinstance(value, str) or not value.strip():
         return None
@@ -334,9 +335,7 @@ def parse_created_at(value: object) -> datetime | None:
 
 
 def supply_is_done(supply: dict) -> bool:
-    """
-    Возвращает признак завершённой поставки по полю WB `done`.
-    """
+    """Возвращает признак завершённой поставки по полю WB `done`."""
     value = supply.get("done", False)
 
     if isinstance(value, bool):
@@ -374,8 +373,7 @@ def supply_matches_filters(
     """
     Проверяет, должна ли поставка быть видна в списке.
 
-    Фильтры применяются только к уже загруженному списку.
-    При изменении фильтра новые запросы к WB API не выполняются.
+    Фильтры применяются к уже загруженному списку, без новых запросов к WB.
     """
     if status_filter == "Только активные" and supply_is_done(supply):
         return False
@@ -416,7 +414,7 @@ def sort_supply_ids(
     supply_ids: list[str],
     supply_by_id: dict[str, dict],
 ) -> list[str]:
-    """Сортирует поставки: сначала новые, потом по имени и ID."""
+    """Сортирует поставки: сначала новые, потом по названию и ID."""
     def sort_key(supply_id: str) -> tuple[float, str, str]:
         supply = supply_by_id[supply_id]
         created_at = parse_created_at(supply.get("createdAt"))
@@ -441,7 +439,7 @@ def sort_supply_ids(
 # ============================================================
 
 def render_sidebar() -> None:
-    """Отображает навигационную боковую панель."""
+    """Отображает боковую панель приложения."""
     with st.sidebar:
         st.markdown("## 📦 WB FBS")
         st.caption("Стикеры сборочных заданий")
@@ -455,7 +453,7 @@ def render_sidebar() -> None:
         st.markdown(
             """
             1. Обновите список поставок WB.
-            2. Установите нужные фильтры.
+            2. Установите нужный фильтр.
             3. Выберите поставки.
             4. Сформируйте файлы.
             5. Откройте PDF нужного артикула в новой вкладке.
@@ -503,10 +501,10 @@ def build_article_table(summary: dict) -> pd.DataFrame:
 
 def render_results(result: dict) -> None:
     """
-    Показывает сводку по артикулам и ссылки для открытия PDF.
+    Показывает сводку по артикулам и ссылки на PDF.
 
-    Для каждого артикула подготовлен PDF, содержащий только оригинальные
-    стикеры WB этого артикула. PDF открывается в новой вкладке браузера.
+    По умолчанию артикулы сортируются от большего количества стикеров
+    к меньшему. Нижний блок отдельных PDF использует такой же порядок.
     """
     summary = result["summary"]
 
@@ -556,15 +554,41 @@ def render_results(result: dict) -> None:
             placeholder="Например: NAKL_AFFIRMATIONS_160",
         )
 
+    sort_options = {
+        "Количество стикеров — по убыванию": (
+            "Количество стикеров",
+            False,
+        ),
+        "Количество стикеров — по возрастанию": (
+            "Количество стикеров",
+            True,
+        ),
+        "Количество поставок — по убыванию": (
+            "Количество поставок",
+            False,
+        ),
+        "Количество поставок — по возрастанию": (
+            "Количество поставок",
+            True,
+        ),
+        "Артикул — А → Я": (
+            "Артикул продавца",
+            True,
+        ),
+        "Артикул — Я → А": (
+            "Артикул продавца",
+            False,
+        ),
+    }
+
     with filter_col_2:
-        sort_by = st.selectbox(
+        sort_label = st.selectbox(
             "Сортировка списка",
-            options=[
-                "Артикул продавца",
-                "Количество стикеров",
-                "Количество поставок",
-            ],
+            options=list(sort_options.keys()),
+            index=0,
         )
+
+    sort_by, sort_ascending = sort_options[sort_label]
 
     filtered_table = table.copy()
 
@@ -580,6 +604,7 @@ def render_results(result: dict) -> None:
 
     filtered_table = filtered_table.sort_values(
         by=sort_by,
+        ascending=sort_ascending,
         kind="stable",
     )
 
@@ -629,10 +654,10 @@ def render_results(result: dict) -> None:
     st.divider()
     st.subheader("🔗 Стикеры по отдельным артикулам")
 
-    st.info(
-        "Нажмите кнопку нужного артикула. В новой вкладке браузера "
-        "откроется PDF только с оригинальными стикерами WB этого "
-        "артикула. В открывшемся PDF нажмите «Печать»."
+    st.caption(
+        "Артикулы идут в том же порядке, что и таблица выше. "
+        "По умолчанию сначала отображаются группы с наибольшим "
+        "количеством стикеров."
     )
 
     article_pdf_by_name = dict(result["article_pdfs"])
@@ -648,24 +673,47 @@ def render_results(result: dict) -> None:
         st.warning("По текущему поиску не найдено артикулов.")
         return
 
+    header_col_1, header_col_2, header_col_3, header_col_4 = st.columns(
+        [2.8, 0.8, 0.8, 1.7]
+    )
+
+    with header_col_1:
+        st.caption("**Артикул продавца**")
+
+    with header_col_2:
+        st.caption("**Стикеры**")
+
+    with header_col_3:
+        st.caption("**Поставки**")
+
+    with header_col_4:
+        st.caption("**PDF**")
+
     for article in visible_articles:
         group = group_by_article[article]
 
-        with st.container(border=True):
-            info_col, open_col = st.columns([2.2, 1])
+        article_col, stickers_col, supplies_col, open_col = st.columns(
+            [2.8, 0.8, 0.8, 1.7]
+        )
 
-            with info_col:
-                st.markdown(f"### `{article}`")
-                st.caption(
-                    f"Стикеров: {len(group['order_ids'])} · "
-                    f"Поставок: {group['supply_count']}"
-                )
+        with article_col:
+            st.markdown(f"`{article}`")
 
-            with open_col:
-                render_open_pdf_button(
-                    article=article,
-                    pdf_bytes=article_pdf_by_name[article],
-                )
+        with stickers_col:
+            st.markdown(
+                f"**{len(group['order_ids'])}**"
+            )
+
+        with supplies_col:
+            st.markdown(
+                f"**{group['supply_count']}**"
+            )
+
+        with open_col:
+            render_open_pdf_button(
+                article=article,
+                pdf_bytes=article_pdf_by_name[article],
+            )
 
     st.warning(
         f"Размер страницы PDF: {result['sticker_size_name']}. "
@@ -762,12 +810,14 @@ def render_main_page(client: WBClient) -> None:
         period_name = st.selectbox(
             "Период создания поставки",
             options=[
+                "Последний 1 день",
+                "Последние 3 дня",
                 "Последние 7 дней",
                 "Последние 30 дней",
                 "Последние 90 дней",
                 "Все поставки",
             ],
-            index=1,
+            index=0,
             help=(
                 "Фильтруется поле WB `createdAt`: дата создания поставки "
                 "в часовой зоне Europe/Moscow. Это не дата создания заказа."
@@ -796,6 +846,8 @@ def render_main_page(client: WBClient) -> None:
         )
 
     period_days_map = {
+        "Последний 1 день": 1,
+        "Последние 3 дня": 3,
         "Последние 7 дней": 7,
         "Последние 30 дней": 30,
         "Последние 90 дней": 90,
@@ -844,7 +896,6 @@ def render_main_page(client: WBClient) -> None:
         f"supplies_{st.session_state['supply_widget_version']}"
     )
 
-    # Обработка пресета должна идти до создания multiselect.
     preset_ids = st.session_state.pop("preset_supply_ids", None)
 
     if preset_ids is not None:
@@ -859,7 +910,6 @@ def render_main_page(client: WBClient) -> None:
     if not isinstance(saved_selected_ids, list):
         saved_selected_ids = []
 
-    # Уже выбранные поставки остаются в списке, даже если фильтр скрывает их.
     option_ids = list(
         dict.fromkeys(
             [
@@ -957,7 +1007,7 @@ def render_main_page(client: WBClient) -> None:
     with settings_col_1:
         lookback_days = st.selectbox(
             "Период поиска заданий WB",
-            options=[31, 90, 180],
+            options=[7, 31, 90, 180],
             index=0,
             format_func=lambda days: f"Последние {days} дней",
             help=(
@@ -1007,7 +1057,6 @@ def render_main_page(client: WBClient) -> None:
         and current_result["signature"] != result_signature
     ):
         invalidate_result()
-        current_result = None
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -1019,7 +1068,6 @@ def render_main_page(client: WBClient) -> None:
     )
 
     if generate_clicked:
-        # Старый результат становится недоступен сразу.
         invalidate_result()
 
         try:
@@ -1041,7 +1089,6 @@ def render_main_page(client: WBClient) -> None:
                     height_mm=sticker_height,
                 )
 
-                # Отдельный PDF для каждого точного артикула.
                 article_pdfs: list[tuple[str, bytes]] = []
 
                 for group in summary["groups"]:

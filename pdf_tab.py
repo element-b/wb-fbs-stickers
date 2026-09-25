@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import html
 import json
 
 import streamlit.components.v1 as components
@@ -12,14 +11,10 @@ def render_open_pdf_button(
     pdf_bytes: bytes,
 ) -> None:
     """
-    Рисует кнопку, открывающую PDF в новой вкладке браузера.
+    Показывает компактную кнопку для открытия PDF в новой вкладке.
 
-    PDF не сохраняется на диск и не публикуется по постоянной ссылке.
-    Он передаётся из памяти текущей Streamlit-сессии в браузер только
-    для открытия пользователем.
-
-    В новой вкладке откроется встроенный просмотрщик PDF браузера,
-    из которого можно распечатать стикеры.
+    PDF передаётся из памяти текущей Streamlit-сессии в браузер.
+    Постоянная публичная ссылка и файлы на сервере не создаются.
     """
     if not pdf_bytes:
         raise ValueError(
@@ -28,11 +23,12 @@ def render_open_pdf_button(
 
     pdf_base64 = base64.b64encode(pdf_bytes).decode("ascii")
 
-    # json.dumps безопасно экранирует строку для вставки в JavaScript.
-    article_json = json.dumps(str(article), ensure_ascii=False)
-    pdf_base64_json = json.dumps(pdf_base64)
+    article_json = json.dumps(
+        str(article),
+        ensure_ascii=False,
+    )
 
-    article_html = html.escape(str(article))
+    pdf_base64_json = json.dumps(pdf_base64)
 
     component_html = f"""
     <!DOCTYPE html>
@@ -43,49 +39,44 @@ def render_open_pdf_button(
             body {{
                 margin: 0;
                 padding: 0;
-                font-family: -apple-system, BlinkMacSystemFont,
-                    "Segoe UI", sans-serif;
                 background: transparent;
+                font-family: Arial, sans-serif;
             }}
 
-            .open-button {{
+            #open-pdf-button {{
                 width: 100%;
-                min-height: 42px;
-                border: 0;
-                border-radius: 7px;
+                min-height: 34px;
+                padding: 7px 9px;
+                border: none;
+                border-radius: 6px;
                 background: #009B77;
                 color: #FFFFFF;
                 cursor: pointer;
-                font-size: 14px;
+                font-size: 12px;
                 font-weight: 600;
-                padding: 9px 14px;
+                white-space: nowrap;
             }}
 
-            .open-button:hover {{
+            #open-pdf-button:hover {{
                 background: #008268;
             }}
 
-            .message {{
+            #error-message {{
                 display: none;
-                margin-top: 7px;
+                margin-top: 4px;
                 color: #B42318;
-                font-size: 12px;
-                line-height: 1.35;
+                font-size: 10px;
+                line-height: 1.25;
             }}
         </style>
     </head>
     <body>
-        <button
-            class="open-button"
-            id="open-pdf-button"
-            type="button"
-        >
-            ↗ Открыть стикеры артикула в новой вкладке
+        <button id="open-pdf-button" type="button">
+            ↗ Открыть PDF
         </button>
 
-        <div class="message" id="popup-message">
-            Браузер заблокировал новую вкладку. Разрешите всплывающие окна
-            для этого сайта и нажмите кнопку ещё раз.
+        <div id="error-message">
+            Разрешите всплывающие окна для этого сайта.
         </div>
 
         <script>
@@ -99,13 +90,19 @@ def render_open_pdf_button(
                         const binary = window.atob(pdfBase64);
                         const bytes = new Uint8Array(binary.length);
 
-                        for (let index = 0; index < binary.length; index += 1) {{
+                        for (
+                            let index = 0;
+                            index < binary.length;
+                            index += 1
+                        ) {{
                             bytes[index] = binary.charCodeAt(index);
                         }}
 
                         const pdfBlob = new Blob(
                             [bytes],
-                            {{ type: "application/pdf" }}
+                            {{
+                                type: "application/pdf"
+                            }}
                         );
 
                         const pdfUrl = URL.createObjectURL(pdfBlob);
@@ -117,25 +114,20 @@ def render_open_pdf_button(
 
                         if (!openedWindow) {{
                             document.getElementById(
-                                "popup-message"
+                                "error-message"
                             ).style.display = "block";
 
                             URL.revokeObjectURL(pdfUrl);
                             return;
                         }}
 
-                        openedWindow.document.title =
-                            "Стикеры WB — " + article;
-
-                        // Даём браузеру время открыть PDF, затем
-                        // освобождаем временный URL.
                         window.setTimeout(function () {{
                             URL.revokeObjectURL(pdfUrl);
                         }}, 120000);
 
                     }} catch (error) {{
                         document.getElementById(
-                            "popup-message"
+                            "error-message"
                         ).style.display = "block";
                     }}
                 }});
@@ -146,6 +138,6 @@ def render_open_pdf_button(
 
     components.html(
         component_html,
-        height=54,
+        height=40,
         scrolling=False,
     )
