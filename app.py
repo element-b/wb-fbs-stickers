@@ -26,7 +26,7 @@ STICKER_SIZES = {
 # ============================================================
 
 st.set_page_config(
-    page_title="Стикеры WB FBS",
+    page_title="FBZ",
     page_icon="📦",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -386,7 +386,7 @@ def render_login_page(users: dict[str, str]) -> None:
         st.markdown(
             (
                 '<div class="login-subtitle">'
-                'Группировка и печать стикеров сборочных заданий'
+                ''
                 '</div>'
             ),
             unsafe_allow_html=True,
