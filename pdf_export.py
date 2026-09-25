@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from io import BytesIO
-from pathlib import Path
 
 from PIL import Image
 from reportlab.lib.units import mm
@@ -21,7 +20,7 @@ ALLOWED_SIZES = (
 SEPARATOR_FONT_NAME = "WBSeparatorFont"
 
 # В Streamlit Community Cloud обычно доступен DejaVu Sans.
-# Он нужен, чтобы артикулы с кириллицей также печатались корректно.
+# Он поддерживает кириллицу, если артикул содержит русские символы.
 FONT_CANDIDATES = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
@@ -36,9 +35,7 @@ def get_separator_font_name() -> str:
     """
     Возвращает шрифт для служебных этикеток.
 
-    При наличии системного Unicode-шрифта регистрируется DejaVu Sans
-    или Liberation Sans. Если подходящий файл не найден, используется
-    встроенный Helvetica-Bold.
+    Если Unicode-шрифт не найден, используется Helvetica-Bold.
     """
     if SEPARATOR_FONT_NAME in pdfmetrics.getRegisteredFontNames():
         return SEPARATOR_FONT_NAME
@@ -54,13 +51,29 @@ def get_separator_font_name() -> str:
                     font_path,
                 )
             )
-
             return SEPARATOR_FONT_NAME
-
         except Exception:
             continue
 
     return "Helvetica-Bold"
+
+
+def article_for_separator(article: str) -> str:
+    """
+    Готовит артикул только для служебной этикетки-разделителя.
+
+    Удаляется только начальный префикс NAKL_, без изменения исходных
+    данных WB, таблицы артикулов и названий отдельных PDF.
+    """
+    original_article = str(article).strip()
+
+    if original_article.upper().startswith("NAKL_"):
+        shortened_article = original_article[5:].strip()
+
+        if shortened_article:
+            return shortened_article
+
+    return original_article
 
 
 def split_text_by_width(
@@ -70,10 +83,10 @@ def split_text_by_width(
     max_width: float,
 ) -> list[str]:
     """
-    Разбивает длинный артикул на строки, не изменяя его символы.
+    Разбивает длинный текст на строки без изменения его символов.
 
-    Артикулы часто содержат `_`, `-`, цифры и длинные слова, поэтому
-    перенос выполняется посимвольно при необходимости.
+    Перенос выполняется посимвольно, потому что артикулы часто состоят
+    из длинных фрагментов с `_`, `-`, цифрами и латинскими буквами.
     """
     if not text:
         return [""]
@@ -109,13 +122,15 @@ def get_article_layout(
     max_width: float,
 ) -> tuple[float, list[str]]:
     """
-    Подбирает размер шрифта и переносы для артикула.
+    Подбирает уменьшенный размер шрифта и переносы для артикула.
 
-    Цель — напечатать артикул крупно, но уложить его максимум в три строки.
+    Основной размер уменьшен: ранее поиск начинался с 22 pt,
+    теперь — с 18 pt. Это даёт больше свободного места на этикетке.
     """
-    article_text = str(article).strip()
+    article_text = article_for_separator(article)
 
-    for font_size in range(22, 7, -1):
+    # Уменьшенный размер шрифта для компактной служебной этикетки.
+    for font_size in range(18, 6, -1):
         lines = split_text_by_width(
             text=article_text,
             font_name=font_name,
@@ -126,10 +141,10 @@ def get_article_layout(
         if len(lines) <= 3:
             return float(font_size), lines
 
-    return 8.0, split_text_by_width(
+    return 7.0, split_text_by_width(
         text=article_text,
         font_name=font_name,
-        font_size=8.0,
+        font_size=7.0,
         max_width=max_width,
     )
 
@@ -144,11 +159,11 @@ def draw_group_separator(
     """
     Рисует компактную служебную этикетку-разделитель.
 
-    На странице только:
-    - крупный артикул;
-    - количество стикеров.
+    На этикетке печатаются:
+    - артикул без начального префикса NAKL_;
+    - количество оригинальных стикеров WB.
 
-    После вызова функция закрывает текущую страницу PDF.
+    Функция завершает текущую страницу PDF.
     """
     font_name = get_separator_font_name()
 
@@ -161,16 +176,21 @@ def draw_group_separator(
         max_width=usable_width,
     )
 
-    line_height = article_font_size * 1.18
+    line_height = article_font_size * 1.16
     article_block_height = len(article_lines) * line_height
 
     quantity_text = f"QTY: {sticker_count}"
-    quantity_font_size = min(18.0, max(11.0, page_height / 9))
+
+    # Ранее было максимум 18 pt. Уменьшено до 15 pt.
+    quantity_font_size = min(
+        15.0,
+        max(10.0, page_height / 10),
+    )
 
     total_content_height = (
         article_block_height
         + quantity_font_size
-        + (7 * mm)
+        + (6 * mm)
     )
 
     start_y = (
@@ -191,7 +211,7 @@ def draw_group_separator(
         )
         current_y -= line_height
 
-    current_y -= 4 * mm
+    current_y -= 3.5 * mm
 
     pdf.setFont(font_name, quantity_font_size)
     pdf.drawCentredString(
@@ -212,7 +232,7 @@ def draw_wb_sticker(
     """
     Добавляет одну оригинальную PNG-этикетку WB на отдельную PDF-страницу.
 
-    Изображение не обрезается и не перерисовывается.
+    Изображение WB не обрезается, не растягивается и не перерисовывается.
     """
     if not isinstance(png_bytes, bytes) or not png_bytes:
         raise ValueError(
@@ -237,7 +257,7 @@ def draw_wb_sticker(
         image_ratio = image_width / image_height
         page_ratio = page_width / page_height
 
-        # Не допускаем растяжение или обрезку QR/штрихкода.
+        # Нельзя растягивать или обрезать QR/штрихкод.
         if abs(image_ratio - page_ratio) > 0.01:
             raise ValueError(
                 "Пропорции стикера WB не соответствуют "
@@ -275,8 +295,8 @@ def make_pdf(
     Один оригинальный стикер WB — одна страница PDF.
 
     Если `include_group_separators=True`, перед каждой группой артикулов,
-    включая первую, добавляется компактная служебная этикетка:
-    артикул крупным текстом и количество стикеров.
+    включая первую, добавляется служебная этикетка с артикулом без
+    начального префикса NAKL_ и количеством стикеров.
 
     Оригинальные стикеры WB не изменяются.
     """
