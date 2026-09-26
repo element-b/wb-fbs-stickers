@@ -26,7 +26,7 @@ STICKER_SIZES = {
 # ============================================================
 
 st.set_page_config(
-    page_title="Стикеры WB FBS",
+    page_title="FBZ",
     page_icon="📦",
     layout="wide",
     initial_sidebar_state="expanded",
