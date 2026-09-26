@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hmac
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -26,7 +26,7 @@ STICKER_SIZES = {
 # ============================================================
 
 st.set_page_config(
-    page_title="FBZ",
+    page_title="Стикеры WB FBS",
     page_icon="📦",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -282,10 +282,10 @@ def init_session_state() -> None:
 
 def invalidate_result() -> None:
     """
-    Удаляет старые сформированные PDF из памяти текущей сессии.
+    Удаляет сформированные PDF из памяти текущей сессии.
 
     После изменения выбранных поставок, размера стикера или периода
-    поиска нельзя продолжать использовать предыдущий файл.
+    поиска заданий нельзя продолжать использовать старый файл.
     """
     st.session_state["result"] = None
 
@@ -379,14 +379,14 @@ def render_login_page(users: dict[str, str]) -> None:
 
     with center_column:
         st.markdown(
-            '<div class="login-title"></div>',
+            '<div class="login-title">📦 Стикеры WB FBS</div>',
             unsafe_allow_html=True,
         )
 
         st.markdown(
             (
                 '<div class="login-subtitle">'
-                ''
+                'Группировка и печать стикеров сборочных заданий'
                 '</div>'
             ),
             unsafe_allow_html=True,
@@ -435,7 +435,7 @@ def logout() -> None:
 
 def parse_created_at(value: object) -> datetime | None:
     """
-    Преобразует поле WB `createdAt` в дату/время Europe/Moscow.
+    Преобразует поле WB `createdAt` в дату и время Europe/Moscow.
 
     Если WB передаёт дату без часовой зоны, она трактуется как UTC.
     """
@@ -486,16 +486,68 @@ def format_supply_label(supply: dict) -> str:
     )
 
 
+def value_to_date(value: object) -> date | None:
+    """Безопасно преобразует значение Streamlit в объект date."""
+    if isinstance(value, datetime):
+        return value.date()
+
+    if isinstance(value, date):
+        return value
+
+    return None
+
+
+def parse_date_range(
+    selected_value: object,
+) -> tuple[date | None, date | None]:
+    """
+    Извлекает начальную и конечную дату из date_input.
+
+    Streamlit для диапазона обычно возвращает кортеж из двух дат.
+    Если пользователь выбрал одну дату, она используется как начало
+    и конец диапазона.
+    """
+    if isinstance(selected_value, (tuple, list)):
+        values = list(selected_value)
+
+        if not values:
+            return None, None
+
+        date_from = value_to_date(values[0])
+
+        if len(values) >= 2:
+            date_to = value_to_date(values[1])
+        else:
+            date_to = date_from
+
+        if date_from is None:
+            return None, None
+
+        if date_to is None:
+            date_to = date_from
+
+        if date_from > date_to:
+            return date_to, date_from
+
+        return date_from, date_to
+
+    selected_date = value_to_date(selected_value)
+
+    return selected_date, selected_date
+
+
 def supply_matches_filters(
     supply: dict,
     search_text: str,
-    period_days: int | None,
+    date_from: date | None,
+    date_to: date | None,
     status_filter: str,
 ) -> bool:
     """
     Проверяет, должна ли поставка быть видна в списке.
 
-    Фильтры применяются к уже загруженному списку, без новых запросов к WB.
+    Фильтрация даты выполняется по WB `createdAt` — дате создания
+    поставки в часовой зоне Europe/Moscow.
     """
     if status_filter == "Только активные" and supply_is_done(supply):
         return False
@@ -503,18 +555,18 @@ def supply_matches_filters(
     if status_filter == "Только завершённые" and not supply_is_done(supply):
         return False
 
-    if period_days is not None:
+    if date_from is not None or date_to is not None:
         created_at = parse_created_at(supply.get("createdAt"))
 
         if created_at is None:
             return False
 
-        min_date = (
-            datetime.now(MOSCOW_TZ).date()
-            - timedelta(days=period_days - 1)
-        )
+        created_date = created_at.date()
 
-        if created_at.date() < min_date:
+        if date_from is not None and created_date < date_from:
+            return False
+
+        if date_to is not None and created_date > date_to:
             return False
 
     normalized_search = search_text.strip().casefold()
@@ -575,7 +627,7 @@ def render_sidebar() -> None:
         st.markdown(
             """
             1. Обновите список поставок WB.
-            2. Установите фильтр.
+            2. Установите фильтр по дате.
             3. Выберите поставки.
             4. Сформируйте файлы.
             5. Откройте PDF нужного артикула.
@@ -921,27 +973,33 @@ def render_main_page(client: WBClient) -> None:
     st.divider()
     st.subheader("Фильтры списка поставок")
 
-    filter_col_1, filter_col_2, filter_col_3 = st.columns([1, 1, 2])
+    today = datetime.now(MOSCOW_TZ).date()
 
-    with filter_col_1:
-        period_name = st.selectbox(
-            "Период создания поставки",
-            options=[
-                "Последний 1 день",
-                "Последние 3 дня",
-                "Последние 7 дней",
-                "Последние 30 дней",
-                "Последние 90 дней",
-                "Все поставки",
-            ],
-            index=0,
+    date_col, status_col, search_col = st.columns([1.6, 1, 1.8])
+
+    with date_col:
+        show_all_dates = st.checkbox(
+            "Показать поставки за все даты",
+            value=False,
             help=(
-                "Фильтруется поле WB `createdAt`: дата создания поставки "
-                "в часовой зоне Europe/Moscow. Это не дата создания заказа."
+                "По умолчанию показаны поставки, созданные сегодня. "
+                "Включите этот флажок, чтобы отключить фильтр по дате."
             ),
         )
 
-    with filter_col_2:
+        selected_date_range = st.date_input(
+            "Дата создания поставки",
+            value=(today, today),
+            format="DD.MM.YYYY",
+            disabled=show_all_dates,
+            help=(
+                "Выберите одну дату или диапазон дат. "
+                "Фильтруется поле WB `createdAt` в зоне Europe/Moscow. "
+                "Это дата создания поставки, а не дата создания заказа."
+            ),
+        )
+
+    with status_col:
         status_filter = st.selectbox(
             "Статус поставки",
             options=[
@@ -956,22 +1014,31 @@ def render_main_page(client: WBClient) -> None:
             ),
         )
 
-    with filter_col_3:
+    with search_col:
         supply_search = st.text_input(
             "Поиск поставки",
             placeholder="Введите часть названия или ID",
         )
 
-    period_days_map = {
-        "Последний 1 день": 1,
-        "Последние 3 дня": 3,
-        "Последние 7 дней": 7,
-        "Последние 30 дней": 30,
-        "Последние 90 дней": 90,
-        "Все поставки": None,
-    }
+    if show_all_dates:
+        date_from = None
+        date_to = None
+        date_filter_text = "Дата: все"
+    else:
+        date_from, date_to = parse_date_range(selected_date_range)
 
-    period_days = period_days_map[period_name]
+        if date_from is None or date_to is None:
+            date_filter_text = "Дата: не выбрана"
+        elif date_from == date_to:
+            date_filter_text = (
+                f"Дата: {date_from.strftime('%d.%m.%Y')}"
+            )
+        else:
+            date_filter_text = (
+                "Дата: "
+                f"{date_from.strftime('%d.%m.%Y')} — "
+                f"{date_to.strftime('%d.%m.%Y')}"
+            )
 
     visible_ids = [
         supply_id
@@ -979,7 +1046,8 @@ def render_main_page(client: WBClient) -> None:
         if supply_matches_filters(
             supply=supply,
             search_text=supply_search,
-            period_days=period_days,
+            date_from=date_from,
+            date_to=date_to,
             status_filter=status_filter,
         )
     ]
@@ -989,7 +1057,6 @@ def render_main_page(client: WBClient) -> None:
         supply_by_id=supply_by_id,
     )
 
-    today = datetime.now(MOSCOW_TZ).date()
     today_ids = []
 
     for supply_id, supply in supply_by_id.items():
@@ -1004,6 +1071,7 @@ def render_main_page(client: WBClient) -> None:
     )
 
     st.caption(
+        f"{date_filter_text}. "
         f"Поставок, подходящих под фильтры: {len(visible_ids)}. "
         f"Создано сегодня по Москве: {len(today_ids)}."
     )
@@ -1026,6 +1094,8 @@ def render_main_page(client: WBClient) -> None:
     if not isinstance(saved_selected_ids, list):
         saved_selected_ids = []
 
+    # Уже выбранные поставки остаются в поле, даже если текущий
+    # фильтр по дате или поиск временно их скрывают.
     option_ids = list(
         dict.fromkeys(
             [
