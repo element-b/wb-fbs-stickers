@@ -160,12 +160,7 @@ def apply_main_styles() -> None:
 
 
 def apply_login_styles() -> None:
-    """
-    Стили страницы входа.
-
-    Оформление повторяет страницу авторизации проекта
-    «Контроль поставок Ozon».
-    """
+    """Стили страницы входа в стиле проекта «Контроль поставок Ozon»."""
     st.markdown(
         """
         <style>
@@ -241,21 +236,6 @@ def apply_login_styles() -> None:
                 outline: 3px solid rgba(80, 200, 120, 0.45) !important;
                 outline-offset: 3px;
             }
-
-            .login-title {
-                color: #FFFFFF !important;
-                text-align: center;
-                font-size: 1.9rem;
-                font-weight: 700;
-                margin-bottom: 0.55rem;
-            }
-
-            .login-subtitle {
-                color: #C7C5D5 !important;
-                text-align: center;
-                font-size: 0.96rem;
-                margin-bottom: 1.8rem;
-            }
         </style>
         """,
         unsafe_allow_html=True,
@@ -267,7 +247,7 @@ def apply_login_styles() -> None:
 # ============================================================
 
 def init_session_state() -> None:
-    """Создаёт начальные переменные текущей пользовательской сессии."""
+    """Создаёт начальные значения состояния пользовательской сессии."""
     defaults = {
         "authenticated": False,
         "supplies": None,
@@ -281,12 +261,7 @@ def init_session_state() -> None:
 
 
 def invalidate_result() -> None:
-    """
-    Удаляет сформированные PDF из памяти текущей сессии.
-
-    После изменения выбранных поставок, размера стикера или периода
-    поиска заданий нельзя продолжать использовать старый файл.
-    """
+    """Удаляет старые сформированные PDF из памяти текущей сессии."""
     st.session_state["result"] = None
 
 
@@ -298,7 +273,7 @@ def get_users() -> dict[str, str]:
     """
     Читает пользователей из Streamlit Secrets.
 
-    Ожидаемый формат Secrets:
+    Ожидаемый формат:
 
     [users]
     kladovshik = "ваш-пароль"
@@ -348,7 +323,7 @@ def authenticate(
     password: str,
     users: dict[str, str],
 ) -> bool:
-    """Проверяет логин и пароль из формы."""
+    """Проверяет введённые логин и пароль."""
     matched = False
 
     for configured_username, configured_password in users.items():
@@ -370,28 +345,14 @@ def authenticate(
 
 
 def render_login_page(users: dict[str, str]) -> None:
-    """Отображает страницу входа в стиле проекта Ozon."""
+    """Отображает страницу входа без заголовка и подзаголовка."""
     apply_login_styles()
 
-    st.markdown("<br><br><br><br>", unsafe_allow_html=True)
+    st.markdown("<br><br><br><br><br>", unsafe_allow_html=True)
 
     _, center_column, _ = st.columns([1, 1.05, 1])
 
     with center_column:
-        st.markdown(
-            '<div class="login-title">📦 Стикеры WB FBS</div>',
-            unsafe_allow_html=True,
-        )
-
-        st.markdown(
-            (
-                '<div class="login-subtitle">'
-                'Группировка и печать стикеров сборочных заданий'
-                '</div>'
-            ),
-            unsafe_allow_html=True,
-        )
-
         with st.form("login_form", clear_on_submit=False):
             username = st.text_input(
                 "Логин",
@@ -430,14 +391,14 @@ def logout() -> None:
 
 
 # ============================================================
-# РАБОТА СО СПИСКОМ ПОСТАВОК И ФИЛЬТРАМИ
+# ПОСТАВКИ И ФИЛЬТРЫ
 # ============================================================
 
 def parse_created_at(value: object) -> datetime | None:
     """
-    Преобразует поле WB `createdAt` в дату и время Europe/Moscow.
+    Преобразует WB `createdAt` в дату и время Europe/Moscow.
 
-    Если WB передаёт дату без часовой зоны, она трактуется как UTC.
+    Дата без часовой зоны трактуется как UTC.
     """
     if not isinstance(value, str) or not value.strip():
         return None
@@ -467,7 +428,7 @@ def supply_is_done(supply: dict) -> bool:
 
 
 def format_supply_label(supply: dict) -> str:
-    """Создаёт подпись поставки для списка выбора."""
+    """Формирует понятную подпись поставки для списка выбора."""
     supply_id = str(supply.get("id", "")).strip()
     name = str(supply.get("name") or "Без названия").strip()
 
@@ -501,11 +462,9 @@ def parse_date_range(
     selected_value: object,
 ) -> tuple[date | None, date | None]:
     """
-    Извлекает начальную и конечную дату из date_input.
+    Извлекает границы диапазона из Streamlit date_input.
 
-    Streamlit для диапазона обычно возвращает кортеж из двух дат.
-    Если пользователь выбрал одну дату, она используется как начало
-    и конец диапазона.
+    При выборе одной даты она используется как начало и конец диапазона.
     """
     if isinstance(selected_value, (tuple, list)):
         values = list(selected_value)
@@ -544,10 +503,10 @@ def supply_matches_filters(
     status_filter: str,
 ) -> bool:
     """
-    Проверяет, должна ли поставка быть видна в списке.
+    Проверяет, должна ли поставка быть показана в списке.
 
-    Фильтрация даты выполняется по WB `createdAt` — дате создания
-    поставки в часовой зоне Europe/Moscow.
+    Дата фильтруется по `createdAt`: это дата создания поставки WB
+    в зоне Europe/Moscow, а не дата создания заказа.
     """
     if status_filter == "Только активные" and supply_is_done(supply):
         return False
@@ -588,7 +547,7 @@ def sort_supply_ids(
     supply_ids: list[str],
     supply_by_id: dict[str, dict],
 ) -> list[str]:
-    """Сортирует поставки: сначала новые, потом по названию и ID."""
+    """Сортирует поставки: новые сверху, затем по названию и ID."""
     def sort_key(supply_id: str) -> tuple[float, str, str]:
         supply = supply_by_id[supply_id]
         created_at = parse_created_at(supply.get("createdAt"))
@@ -627,7 +586,7 @@ def render_sidebar() -> None:
         st.markdown(
             """
             1. Обновите список поставок WB.
-            2. Установите фильтр по дате.
+            2. Выберите дату или диапазон дат.
             3. Выберите поставки.
             4. Сформируйте файлы.
             5. Откройте PDF нужного артикула.
@@ -653,11 +612,7 @@ def render_sidebar() -> None:
 # ============================================================
 
 def build_article_table(summary: dict) -> pd.DataFrame:
-    """
-    Строит итоговую таблицу.
-
-    Одна строка — один точный артикул продавца WB.
-    """
+    """Строит таблицу: одна строка — один артикул продавца WB."""
     rows = []
 
     for group in summary["groups"]:
@@ -674,10 +629,10 @@ def build_article_table(summary: dict) -> pd.DataFrame:
 
 def render_results(result: dict) -> None:
     """
-    Показывает сводку по артикулам и ссылки на PDF.
+    Показывает сводку по артикулам и ссылки на отдельные PDF.
 
-    По умолчанию артикулы сортируются от большего количества стикеров
-    к меньшему. Нижний блок отдельных PDF использует такой же порядок.
+    По умолчанию список сортируется по количеству стикеров — от большего
+    к меньшему.
     """
     summary = result["summary"]
 
@@ -829,8 +784,8 @@ def render_results(result: dict) -> None:
     st.subheader("🔗 Стикеры по отдельным артикулам")
 
     st.caption(
-        "PDF каждого отдельного артикула также начинается со служебной "
-        "этикетки с артикулом и количеством стикеров."
+        "PDF каждого артикула также начинается со служебной этикетки "
+        "с артикулом и количеством стикеров."
     )
 
     article_pdf_by_name = dict(result["article_pdfs"])
@@ -978,20 +933,10 @@ def render_main_page(client: WBClient) -> None:
     date_col, status_col, search_col = st.columns([1.6, 1, 1.8])
 
     with date_col:
-        show_all_dates = st.checkbox(
-            "Показать поставки за все даты",
-            value=False,
-            help=(
-                "По умолчанию показаны поставки, созданные сегодня. "
-                "Включите этот флажок, чтобы отключить фильтр по дате."
-            ),
-        )
-
         selected_date_range = st.date_input(
             "Дата создания поставки",
             value=(today, today),
             format="DD.MM.YYYY",
-            disabled=show_all_dates,
             help=(
                 "Выберите одну дату или диапазон дат. "
                 "Фильтруется поле WB `createdAt` в зоне Europe/Moscow. "
@@ -1020,82 +965,54 @@ def render_main_page(client: WBClient) -> None:
             placeholder="Введите часть названия или ID",
         )
 
-    if show_all_dates:
-        date_from = None
-        date_to = None
-        date_filter_text = "Дата: все"
-    else:
-        date_from, date_to = parse_date_range(selected_date_range)
+    date_from, date_to = parse_date_range(selected_date_range)
 
-        if date_from is None or date_to is None:
-            date_filter_text = "Дата: не выбрана"
-        elif date_from == date_to:
-            date_filter_text = (
-                f"Дата: {date_from.strftime('%d.%m.%Y')}"
-            )
+    if date_from is None or date_to is None:
+        st.warning("Выберите дату или диапазон дат для списка поставок.")
+        visible_ids: list[str] = []
+        date_filter_text = "Дата не выбрана"
+    else:
+        if date_from == date_to:
+            date_filter_text = date_from.strftime("%d.%m.%Y")
         else:
             date_filter_text = (
-                "Дата: "
                 f"{date_from.strftime('%d.%m.%Y')} — "
                 f"{date_to.strftime('%d.%m.%Y')}"
             )
 
-    visible_ids = [
-        supply_id
-        for supply_id, supply in supply_by_id.items()
-        if supply_matches_filters(
-            supply=supply,
-            search_text=supply_search,
-            date_from=date_from,
-            date_to=date_to,
-            status_filter=status_filter,
+        visible_ids = [
+            supply_id
+            for supply_id, supply in supply_by_id.items()
+            if supply_matches_filters(
+                supply=supply,
+                search_text=supply_search,
+                date_from=date_from,
+                date_to=date_to,
+                status_filter=status_filter,
+            )
+        ]
+
+        visible_ids = sort_supply_ids(
+            supply_ids=visible_ids,
+            supply_by_id=supply_by_id,
         )
-    ]
-
-    visible_ids = sort_supply_ids(
-        supply_ids=visible_ids,
-        supply_by_id=supply_by_id,
-    )
-
-    today_ids = []
-
-    for supply_id, supply in supply_by_id.items():
-        created_at = parse_created_at(supply.get("createdAt"))
-
-        if created_at is not None and created_at.date() == today:
-            today_ids.append(supply_id)
-
-    today_ids = sort_supply_ids(
-        supply_ids=today_ids,
-        supply_by_id=supply_by_id,
-    )
 
     st.caption(
-        f"{date_filter_text}. "
-        f"Поставок, подходящих под фильтры: {len(visible_ids)}. "
-        f"Создано сегодня по Москве: {len(today_ids)}."
+        f"Дата создания поставки: {date_filter_text}. "
+        f"Поставок, подходящих под фильтры: {len(visible_ids)}."
     )
 
     widget_key = (
         f"supplies_{st.session_state['supply_widget_version']}"
     )
 
-    preset_ids = st.session_state.pop("preset_supply_ids", None)
-
-    if preset_ids is not None:
-        st.session_state[widget_key] = [
-            supply_id
-            for supply_id in preset_ids
-            if supply_id in supply_by_id
-        ]
-
     saved_selected_ids = st.session_state.get(widget_key, [])
 
     if not isinstance(saved_selected_ids, list):
         saved_selected_ids = []
 
-    # Уже выбранные поставки остаются в поле, даже если текущий
-    # фильтр по дате или поиск временно их скрывают.
+    # Уже выбранные поставки остаются в поле выбора, даже если текущий
+    # фильтр даты или поиск временно не показывает их в общем списке.
     option_ids = list(
         dict.fromkeys(
             [
@@ -1118,37 +1035,15 @@ def render_main_page(client: WBClient) -> None:
         placeholder="Выберите минимум две поставки",
     )
 
-    action_col_1, action_col_2, action_col_3 = st.columns([1.3, 1, 2.7])
+    action_col_1, action_col_2 = st.columns([1, 3])
 
     with action_col_1:
-        add_today_clicked = st.button(
-            "➕ Добавить созданные сегодня",
-            use_container_width=True,
-            disabled=not today_ids,
-        )
-
-    with action_col_2:
         clear_selection_clicked = st.button(
             "🧹 Очистить выбор",
             use_container_width=True,
         )
 
-    if add_today_clicked:
-        st.session_state["preset_supply_ids"] = list(
-            dict.fromkeys(
-                [
-                    *selected_ids,
-                    *today_ids,
-                ]
-            )
-        )
-
-        invalidate_result()
-        st.session_state["supply_widget_version"] += 1
-        st.rerun()
-
     if clear_selection_clicked:
-        st.session_state["preset_supply_ids"] = []
         st.session_state["manual_supply_ids"] = ""
 
         invalidate_result()
@@ -1181,14 +1076,13 @@ def render_main_page(client: WBClient) -> None:
 
     if len(all_ids) == 1:
         st.warning(
-            "Для рабочей группировки выберите минимум две поставки. "
-            "Одну поставку используйте только для пробной проверки."
+            "Для рабочей группировки выберите минимум две поставки."
         )
 
     st.divider()
     st.subheader("Параметры формирования файла")
 
-    settings_col_1, settings_col_2, settings_col_3 = st.columns([1, 1, 2])
+    settings_col_1, settings_col_2 = st.columns([1, 1])
 
     with settings_col_1:
         lookback_days = st.selectbox(
@@ -1210,19 +1104,7 @@ def render_main_page(client: WBClient) -> None:
             index=0,
         )
 
-    with settings_col_3:
-        test_mode = st.checkbox(
-            "Тестовый режим: разрешить одну поставку",
-            value=False,
-            help=(
-                "Используйте только для первой проверки токена, "
-                "стикеров WB и пробной печати."
-            ),
-        )
-
     sticker_width, sticker_height = STICKER_SIZES[sticker_size_name]
-
-    minimum_supply_count = 1 if test_mode else 2
 
     selected_supplies = [
         supply_by_id.get(supply_id, {"id": supply_id})
@@ -1249,7 +1131,7 @@ def render_main_page(client: WBClient) -> None:
     generate_clicked = st.button(
         "🔄 Обновить данные и сформировать файлы",
         type="primary",
-        disabled=len(all_ids) < minimum_supply_count,
+        disabled=len(all_ids) < 2,
         use_container_width=True,
     )
 
@@ -1277,8 +1159,7 @@ def render_main_page(client: WBClient) -> None:
                     include_group_separators=True,
                 )
 
-                # PDF отдельного артикула:
-                # также начинается со служебной этикетки.
+                # PDF одного артикула: также начинается с разделителя.
                 article_pdfs: list[tuple[str, bytes]] = []
 
                 for group in summary["groups"]:
