@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hmac
+import re
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
 
+from mysklad_export import make_mysklad_xlsx
 from pdf_export import make_pdf
 from pdf_tab import render_open_pdf_button
 from pipeline import DataCheckError, collect_and_group
@@ -26,7 +28,7 @@ STICKER_SIZES = {
 # ============================================================
 
 st.set_page_config(
-    page_title="FBZ",
+    page_title="Стикеры WB FBS",
     page_icon="📦",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -221,7 +223,6 @@ def apply_login_styles() -> None:
                 border-radius: 8px !important;
                 padding: 11px !important;
                 font-weight: 650 !important;
-                transition: all 0.25s ease-in-out !important;
             }
 
             div[data-testid="stForm"] .stFormSubmitButton > button:hover {
@@ -230,11 +231,6 @@ def apply_login_styles() -> None:
                 border-color: #50C878 !important;
                 box-shadow: 0 5px 18px rgba(80, 200, 120, 0.35) !important;
                 transform: translateY(-1px);
-            }
-
-            div[data-testid="stForm"] .stFormSubmitButton > button:focus-visible {
-                outline: 3px solid rgba(80, 200, 120, 0.45) !important;
-                outline-offset: 3px;
             }
         </style>
         """,
@@ -253,6 +249,8 @@ def init_session_state() -> None:
         "supplies": None,
         "result": None,
         "supply_widget_version": 0,
+        "reprint_lookup_key": None,
+        "reprint_lookup_error": None,
     }
 
     for key, value in defaults.items():
@@ -261,8 +259,10 @@ def init_session_state() -> None:
 
 
 def invalidate_result() -> None:
-    """Удаляет старые сформированные PDF из памяти текущей сессии."""
+    """Удаляет PDF и результаты текущей сформированной партии."""
     st.session_state["result"] = None
+    st.session_state["reprint_lookup_key"] = None
+    st.session_state["reprint_lookup_error"] = None
 
 
 # ============================================================
@@ -270,14 +270,7 @@ def invalidate_result() -> None:
 # ============================================================
 
 def get_users() -> dict[str, str]:
-    """
-    Читает пользователей из Streamlit Secrets.
-
-    Ожидаемый формат:
-
-    [users]
-    kladovshik = "ваш-пароль"
-    """
+    """Читает пользователей из Streamlit Secrets."""
     try:
         configured_users = st.secrets["users"]
     except Exception:
@@ -302,13 +295,7 @@ def get_users() -> dict[str, str]:
         st.error("В таблице `[users]` нет ни одного пользователя.")
         st.stop()
 
-    empty_credentials = [
-        username
-        for username, password in users.items()
-        if not username.strip() or not password
-    ]
-
-    if empty_credentials:
+    if any(not username.strip() or not password for username, password in users.items()):
         st.error(
             "У одного или нескольких пользователей в Secrets указан "
             "пустой логин или пароль."
@@ -345,7 +332,7 @@ def authenticate(
 
 
 def render_login_page(users: dict[str, str]) -> None:
-    """Отображает страницу входа без заголовка и подзаголовка."""
+    """Отображает страницу входа без заголовка."""
     apply_login_styles()
 
     st.markdown("<br><br><br><br><br>", unsafe_allow_html=True)
@@ -385,7 +372,7 @@ def render_login_page(users: dict[str, str]) -> None:
 
 
 def logout() -> None:
-    """Выходит из приложения и очищает данные текущей сессии."""
+    """Выходит из приложения и очищает данные сессии."""
     st.session_state.clear()
     st.rerun()
 
@@ -395,11 +382,7 @@ def logout() -> None:
 # ============================================================
 
 def parse_created_at(value: object) -> datetime | None:
-    """
-    Преобразует WB `createdAt` в дату и время Europe/Moscow.
-
-    Дата без часовой зоны трактуется как UTC.
-    """
+    """Преобразует WB `createdAt` в дату и время Europe/Moscow."""
     if not isinstance(value, str) or not value.strip():
         return None
 
@@ -418,7 +401,7 @@ def parse_created_at(value: object) -> datetime | None:
 
 
 def supply_is_done(supply: dict) -> bool:
-    """Возвращает признак завершённой поставки по полю WB `done`."""
+    """Возвращает признак завершённой поставки WB."""
     value = supply.get("done", False)
 
     if isinstance(value, bool):
@@ -428,16 +411,17 @@ def supply_is_done(supply: dict) -> bool:
 
 
 def format_supply_label(supply: dict) -> str:
-    """Формирует понятную подпись поставки для списка выбора."""
+    """Создаёт подпись поставки для списка выбора."""
     supply_id = str(supply.get("id", "")).strip()
     name = str(supply.get("name") or "Без названия").strip()
 
     created_at = parse_created_at(supply.get("createdAt"))
 
-    if created_at is None:
-        created_text = "дата неизвестна"
-    else:
-        created_text = created_at.strftime("%d.%m.%Y %H:%M")
+    created_text = (
+        created_at.strftime("%d.%m.%Y %H:%M")
+        if created_at is not None
+        else "дата неизвестна"
+    )
 
     status = "завершена" if supply_is_done(supply) else "активна"
 
@@ -448,7 +432,7 @@ def format_supply_label(supply: dict) -> str:
 
 
 def value_to_date(value: object) -> date | None:
-    """Безопасно преобразует значение Streamlit в объект date."""
+    """Безопасно преобразует значение Streamlit в date."""
     if isinstance(value, datetime):
         return value.date()
 
@@ -461,11 +445,7 @@ def value_to_date(value: object) -> date | None:
 def parse_date_range(
     selected_value: object,
 ) -> tuple[date | None, date | None]:
-    """
-    Извлекает границы диапазона из Streamlit date_input.
-
-    При выборе одной даты она используется как начало и конец диапазона.
-    """
+    """Получает начальную и конечную дату из date_input."""
     if isinstance(selected_value, (tuple, list)):
         values = list(selected_value)
 
@@ -473,11 +453,11 @@ def parse_date_range(
             return None, None
 
         date_from = value_to_date(values[0])
-
-        if len(values) >= 2:
-            date_to = value_to_date(values[1])
-        else:
-            date_to = date_from
+        date_to = (
+            value_to_date(values[1])
+            if len(values) > 1
+            else date_from
+        )
 
         if date_from is None:
             return None, None
@@ -485,10 +465,10 @@ def parse_date_range(
         if date_to is None:
             date_to = date_from
 
-        if date_from > date_to:
-            return date_to, date_from
-
-        return date_from, date_to
+        return (
+            min(date_from, date_to),
+            max(date_from, date_to),
+        )
 
     selected_date = value_to_date(selected_value)
 
@@ -502,31 +482,25 @@ def supply_matches_filters(
     date_to: date | None,
     status_filter: str,
 ) -> bool:
-    """
-    Проверяет, должна ли поставка быть показана в списке.
-
-    Дата фильтруется по `createdAt`: это дата создания поставки WB
-    в зоне Europe/Moscow, а не дата создания заказа.
-    """
+    """Проверяет, должна ли поставка быть показана в списке."""
     if status_filter == "Только активные" and supply_is_done(supply):
         return False
 
     if status_filter == "Только завершённые" and not supply_is_done(supply):
         return False
 
-    if date_from is not None or date_to is not None:
-        created_at = parse_created_at(supply.get("createdAt"))
+    created_at = parse_created_at(supply.get("createdAt"))
 
-        if created_at is None:
-            return False
+    if created_at is None:
+        return False
 
-        created_date = created_at.date()
+    created_date = created_at.date()
 
-        if date_from is not None and created_date < date_from:
-            return False
+    if date_from is not None and created_date < date_from:
+        return False
 
-        if date_to is not None and created_date > date_to:
-            return False
+    if date_to is not None and created_date > date_to:
+        return False
 
     normalized_search = search_text.strip().casefold()
 
@@ -547,7 +521,7 @@ def sort_supply_ids(
     supply_ids: list[str],
     supply_by_id: dict[str, dict],
 ) -> list[str]:
-    """Сортирует поставки: новые сверху, затем по названию и ID."""
+    """Сортирует поставки: новые сверху."""
     def sort_key(supply_id: str) -> tuple[float, str, str]:
         supply = supply_by_id[supply_id]
         created_at = parse_created_at(supply.get("createdAt"))
@@ -568,59 +542,171 @@ def sort_supply_ids(
 
 
 # ============================================================
-# БОКОВАЯ ПАНЕЛЬ
+# ПЕРЕПЕЧАТКА ПО КОДУ СТИКЕРА
 # ============================================================
 
-def render_sidebar() -> None:
-    """Отображает боковую панель приложения."""
-    with st.sidebar:
-        st.markdown("## 📦 WB FBS")
-        st.caption("Стикеры сборочных заданий")
-        st.caption(
-            "Приложение не меняет поставки, заказы, статусы и короба."
+def parse_sticker_code(value: str) -> str | None:
+    """
+    Принимает код формата:
+
+    - 231648 9753
+    - 231648-9753
+    - 231648/9753
+    - 231648,9753
+    """
+    match = re.fullmatch(
+        r"\s*(\d+)\s*[\s,;/\-]+\s*(\d+)\s*",
+        value or "",
+    )
+
+    if not match:
+        return None
+
+    return f"{match.group(1)} {match.group(2)}"
+
+
+def render_reprint_search(result: dict) -> None:
+    """
+    Отображает поиск и перепечатку одного стикера.
+
+    Поиск работает по стикерам текущей сформированной партии.
+    """
+    summary = result["summary"]
+    lookup = summary.get("sticker_lookup", {})
+
+    st.divider()
+    st.subheader("♻️ Найти и перепечатать стикер")
+
+    st.caption(
+        "Введите две цифровые части со стикера, например: `231648 9753`. "
+        "Поиск выполняется только в текущей сформированной партии."
+    )
+
+    search_col, button_col = st.columns([3, 1])
+
+    with search_col:
+        sticker_code = st.text_input(
+            "Код стикера",
+            placeholder="231648 9753",
+            key="reprint_sticker_code",
+            label_visibility="collapsed",
         )
 
-        st.divider()
-
-        st.markdown("**Как пользоваться**")
-        st.markdown(
-            """
-            1. Обновите список поставок WB.
-            2. Выберите дату или диапазон дат.
-            3. Выберите поставки.
-            4. Сформируйте файлы.
-            5. Откройте PDF нужного артикула.
-            """
-        )
-
-        st.divider()
-
-        st.caption(
-            "Стикеры и PDF существуют только в памяти текущей сессии."
-        )
-
-        if st.button(
-            "⍈ Выйти",
+    with button_col:
+        search_clicked = st.button(
+            "Найти стикер",
             use_container_width=True,
-            key="logout_button",
-        ):
-            logout()
+            key="find_reprint_sticker",
+        )
+
+    if search_clicked:
+        parsed_code = parse_sticker_code(sticker_code)
+
+        if parsed_code is None:
+            st.session_state["reprint_lookup_key"] = None
+            st.session_state["reprint_lookup_error"] = (
+                "Введите две группы цифр, например: 231648 9753."
+            )
+        else:
+            st.session_state["reprint_lookup_key"] = parsed_code
+            st.session_state["reprint_lookup_error"] = None
+
+    error = st.session_state.get("reprint_lookup_error")
+
+    if error:
+        st.error(error)
+        return
+
+    lookup_key = st.session_state.get("reprint_lookup_key")
+
+    if not lookup_key:
+        return
+
+    found = lookup.get(lookup_key)
+
+    if found is None:
+        if summary.get("searchable_sticker_count", 0) == 0:
+            st.warning(
+                "WB не вернул цифровые части partA и partB для "
+                "стикеров этой партии. Поиск по коду недоступен."
+            )
+        else:
+            st.error(
+                "Стикер с таким кодом не найден среди текущей "
+                "сформированной партии."
+            )
+        return
+
+    article = found["article"]
+    order_id = found["order_id"]
+    destinations = found.get("distribution_centers", [])
+
+    st.success(
+        f"Найден стикер: `{lookup_key}`. Артикул: `{article}`."
+    )
+
+    details_col, print_col = st.columns([2, 1])
+
+    with details_col:
+        st.markdown("**СЦ, куда отправляется этот артикул:**")
+
+        if destinations:
+            for center in destinations:
+                st.write(f"• {center}")
+        else:
+            st.write("• Не определено")
+
+        st.caption(
+            f"ID сборочного задания: {order_id}. "
+            "В PDF будет служебная этикетка и один оригинальный стикер WB."
+        )
+
+    with print_col:
+        reprint_group = {
+            "article": article,
+            "order_ids": [order_id],
+            "stickers": [found["png_bytes"]],
+        }
+
+        try:
+            reprint_pdf = make_pdf(
+                groups=[reprint_group],
+                width_mm=result["sticker_width"],
+                height_mm=result["sticker_height"],
+                include_group_separators=True,
+            )
+
+            render_open_pdf_button(
+                article=f"{article} — перепечатка",
+                pdf_bytes=reprint_pdf,
+            )
+
+        except ValueError as error:
+            st.error(str(error))
 
 
 # ============================================================
-# РЕЗУЛЬТАТЫ: ТАБЛИЦА АРТИКУЛОВ И PDF
+# РЕЗУЛЬТАТЫ И ФАЙЛЫ
 # ============================================================
 
 def build_article_table(summary: dict) -> pd.DataFrame:
-    """Строит таблицу: одна строка — один артикул продавца WB."""
+    """
+    Строит таблицу: одна строка — один артикул.
+
+    СЦ назначения — объединённый список СЦ из выбранных поставок,
+    где встретился этот артикул.
+    """
     rows = []
 
     for group in summary["groups"]:
+        centers = group.get("distribution_centers", [])
+
         rows.append(
             {
                 "Артикул продавца": group["article"],
                 "Количество стикеров": len(group["order_ids"]),
                 "Количество поставок": group["supply_count"],
+                "СЦ назначения": ", ".join(centers) if centers else "—",
             }
         )
 
@@ -628,12 +714,7 @@ def build_article_table(summary: dict) -> pd.DataFrame:
 
 
 def render_results(result: dict) -> None:
-    """
-    Показывает сводку по артикулам и ссылки на отдельные PDF.
-
-    По умолчанию список сортируется по количеству стикеров — от большего
-    к меньшему.
-    """
+    """Показывает список артикулов, СЦ и ссылки на PDF."""
     summary = result["summary"]
 
     st.divider()
@@ -641,25 +722,10 @@ def render_results(result: dict) -> None:
 
     metric_1, metric_2, metric_3, metric_4 = st.columns(4)
 
-    metric_1.metric(
-        "Выбрано поставок",
-        summary["supply_count"],
-    )
-
-    metric_2.metric(
-        "Уникальных артикулов",
-        summary["article_count"],
-    )
-
-    metric_3.metric(
-        "Стикеров / заданий",
-        summary["order_count"],
-    )
-
-    metric_4.metric(
-        "Пустых поставок",
-        len(summary["empty_supplies"]),
-    )
+    metric_1.metric("Выбрано поставок", summary["supply_count"])
+    metric_2.metric("Уникальных артикулов", summary["article_count"])
+    metric_3.metric("Стикеров / заданий", summary["order_count"])
+    metric_4.metric("Пустых поставок", len(summary["empty_supplies"]))
 
     if summary["empty_supplies"]:
         st.warning(
@@ -668,15 +734,15 @@ def render_results(result: dict) -> None:
         )
 
     st.caption(
-        "Одна строка — один артикул продавца. "
-        "Количество стикеров равно количеству сборочных заданий WB."
+        "СЦ определяется из названия поставки. Например: "
+        "`Накл Софьино от 26.09.2026` → `Софьино`."
     )
 
     table = build_article_table(summary)
 
-    filter_col_1, filter_col_2 = st.columns([2, 1])
+    search_col, sort_col = st.columns([2, 1])
 
-    with filter_col_1:
+    with search_col:
         article_search = st.text_input(
             "Поиск по артикулу",
             placeholder="Например: NAKL_AFFIRMATIONS_160",
@@ -703,13 +769,9 @@ def render_results(result: dict) -> None:
             "Артикул продавца",
             True,
         ),
-        "Артикул — Я → А": (
-            "Артикул продавца",
-            False,
-        ),
     }
 
-    with filter_col_2:
+    with sort_col:
         sort_label = st.selectbox(
             "Сортировка списка",
             options=list(sort_options.keys()),
@@ -753,6 +815,10 @@ def render_results(result: dict) -> None:
                 "Количество поставок",
                 format="%d",
             ),
+            "СЦ назначения": st.column_config.TextColumn(
+                "СЦ назначения",
+                width="large",
+            ),
         },
     )
 
@@ -761,31 +827,51 @@ def render_results(result: dict) -> None:
         "стикером WB."
     )
 
+    render_reprint_search(result)
+
     st.divider()
-    st.subheader("📄 Общий файл")
+    st.subheader("📄 Общий файл и выгрузка в МойСклад")
 
     st.caption(
-        "Перед каждой группой, включая первую, печатается служебная "
-        "этикетка с артикулом и количеством стикеров. После неё идут "
-        "оригинальные стикеры WB."
+        "Общий PDF: перед каждой группой печатается служебная этикетка, "
+        "затем идут оригинальные стикеры WB."
     )
 
     timestamp = datetime.now(MOSCOW_TZ).strftime("%Y%m%d_%H%M%S")
 
-    st.download_button(
-        label="📥 Скачать общий PDF по всем артикулам",
-        data=result["full_pdf"],
-        file_name=f"wb_fbs_all_articles_{timestamp}.pdf",
-        mime="application/pdf",
-        use_container_width=True,
+    pdf_col, xlsx_col = st.columns(2)
+
+    with pdf_col:
+        st.download_button(
+            label="📥 Скачать общий PDF",
+            data=result["full_pdf"],
+            file_name=f"wb_fbs_all_articles_{timestamp}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
+
+    with xlsx_col:
+        st.download_button(
+            label="📊 Скачать XLSX для МойСклад",
+            data=result["mysklad_xlsx"],
+            file_name=f"wb_fbs_mysklad_{timestamp}.xlsx",
+            mime=(
+                "application/vnd.openxmlformats-officedocument"
+                ".spreadsheetml.sheet"
+            ),
+            use_container_width=True,
+        )
+
+    st.caption(
+        "XLSX содержит два столбца для импорта: `Артикул` и `Количество`."
     )
 
     st.divider()
     st.subheader("🔗 Стикеры по отдельным артикулам")
 
     st.caption(
-        "PDF каждого артикула также начинается со служебной этикетки "
-        "с артикулом и количеством стикеров."
+        "PDF каждого артикула начинается со служебной этикетки "
+        "с названием артикула и количеством стикеров."
     )
 
     article_pdf_by_name = dict(result["article_pdfs"])
@@ -801,37 +887,40 @@ def render_results(result: dict) -> None:
         st.warning("По текущему поиску не найдено артикулов.")
         return
 
-    header_col_1, header_col_2, header_col_3, header_col_4 = st.columns(
-        [2.8, 0.8, 0.8, 1.7]
+    header_1, header_2, header_3, header_4, header_5 = st.columns(
+        [2.4, 0.7, 0.7, 1.5, 1.3]
     )
 
-    with header_col_1:
-        st.caption("**Артикул продавца**")
-
-    with header_col_2:
-        st.caption("**Стикеры**")
-
-    with header_col_3:
-        st.caption("**Поставки**")
-
-    with header_col_4:
+    with header_1:
+        st.caption("**Артикул**")
+    with header_2:
+        st.caption("**Стик.**")
+    with header_3:
+        st.caption("**Пост.**")
+    with header_4:
+        st.caption("**СЦ**")
+    with header_5:
         st.caption("**PDF**")
 
     for article in visible_articles:
         group = group_by_article[article]
+        centers = group.get("distribution_centers", [])
 
-        article_col, stickers_col, supplies_col, open_col = st.columns(
-            [2.8, 0.8, 0.8, 1.7]
+        article_col, count_col, supply_col, center_col, open_col = st.columns(
+            [2.4, 0.7, 0.7, 1.5, 1.3]
         )
 
         with article_col:
             st.markdown(f"`{article}`")
 
-        with stickers_col:
+        with count_col:
             st.markdown(f"**{len(group['order_ids'])}**")
 
-        with supplies_col:
+        with supply_col:
             st.markdown(f"**{group['supply_count']}**")
+
+        with center_col:
+            st.caption(", ".join(centers) if centers else "—")
 
         with open_col:
             render_open_pdf_button(
@@ -843,8 +932,44 @@ def render_results(result: dict) -> None:
         f"Размер страницы PDF: {result['sticker_size_name']}. "
         "Перед рабочей печатью проверьте пробную этикетку. "
         "В окне печати выберите масштаб 100% / «Фактический размер» "
-        "и отключите настройку «Подогнать под страницу»."
+        "и отключите «Подогнать под страницу»."
     )
+
+
+# ============================================================
+# БОКОВАЯ ПАНЕЛЬ
+# ============================================================
+
+def render_sidebar() -> None:
+    """Отображает боковую панель."""
+    with st.sidebar:
+        st.markdown("## 📦 WB FBS")
+        st.caption("Стикеры сборочных заданий")
+        st.caption(
+            "Приложение не меняет поставки, статусы заказов и короба."
+        )
+
+        st.divider()
+
+        st.markdown("**Как пользоваться**")
+        st.markdown(
+            """
+            1. Обновите список поставок WB.
+            2. Выберите дату или диапазон.
+            3. Выберите поставки.
+            4. Сформируйте файлы.
+            5. Откройте PDF нужного артикула.
+            """
+        )
+
+        st.divider()
+
+        if st.button(
+            "⍈ Выйти",
+            use_container_width=True,
+            key="logout_button",
+        ):
+            logout()
 
 
 # ============================================================
@@ -852,7 +977,7 @@ def render_results(result: dict) -> None:
 # ============================================================
 
 def render_main_page(client: WBClient) -> None:
-    """Отображает основной рабочий экран приложения."""
+    """Отображает основной рабочий экран."""
     render_sidebar()
 
     st.title("📦 Стикеры сборочных заданий WB FBS")
@@ -860,11 +985,9 @@ def render_main_page(client: WBClient) -> None:
     st.markdown(
         """
         <div class="description-box">
-            Выберите несколько поставок WB. Приложение найдёт одинаковые
-            артикулы в разных поставках и сформирует оригинальные стикеры
-            WB группами: сначала служебная этикетка с артикулом, затем все
-            стикеры этого артикула. Поставки, статусы заказов и короба
-            приложение не изменяет.
+            Выберите несколько поставок WB. Приложение сгруппирует
+            оригинальные стикеры WB по артикулам, покажет СЦ назначения
+            и подготовит общий PDF, отдельные PDF и XLSX для МойСклад.
         </div>
         """,
         unsafe_allow_html=True,
@@ -880,13 +1003,12 @@ def render_main_page(client: WBClient) -> None:
 
     with info_col:
         st.caption(
-            "После обновления списка поставок ранее созданные файлы "
+            "После обновления поставок ранее сформированные файлы "
             "удаляются из текущей сессии."
         )
 
     if load_clicked:
         invalidate_result()
-
         st.session_state["supplies"] = None
         st.session_state["manual_supply_ids"] = ""
         st.session_state["supply_widget_version"] += 1
@@ -894,7 +1016,6 @@ def render_main_page(client: WBClient) -> None:
         try:
             with st.spinner("Загружаю список поставок WB…"):
                 st.session_state["supplies"] = client.list_supplies()
-
         except WBApiError as error:
             st.error(str(error))
 
@@ -938,9 +1059,8 @@ def render_main_page(client: WBClient) -> None:
             value=(today, today),
             format="DD.MM.YYYY",
             help=(
-                "Выберите одну дату или диапазон дат. "
-                "Фильтруется поле WB `createdAt` в зоне Europe/Moscow. "
-                "Это дата создания поставки, а не дата создания заказа."
+                "Фильтруется `createdAt`: дата создания поставки WB "
+                "в часовом поясе Europe/Moscow."
             ),
         )
 
@@ -952,11 +1072,6 @@ def render_main_page(client: WBClient) -> None:
                 "Только активные",
                 "Только завершённые",
             ],
-            index=0,
-            help=(
-                "Используется поле WB `done`: "
-                "активная поставка имеет значение done = false."
-            ),
         )
 
     with search_col:
@@ -968,17 +1083,17 @@ def render_main_page(client: WBClient) -> None:
     date_from, date_to = parse_date_range(selected_date_range)
 
     if date_from is None or date_to is None:
-        st.warning("Выберите дату или диапазон дат для списка поставок.")
         visible_ids: list[str] = []
         date_filter_text = "Дата не выбрана"
     else:
-        if date_from == date_to:
-            date_filter_text = date_from.strftime("%d.%m.%Y")
-        else:
-            date_filter_text = (
+        date_filter_text = (
+            date_from.strftime("%d.%m.%Y")
+            if date_from == date_to
+            else (
                 f"{date_from.strftime('%d.%m.%Y')} — "
                 f"{date_to.strftime('%d.%m.%Y')}"
             )
+        )
 
         visible_ids = [
             supply_id
@@ -999,7 +1114,7 @@ def render_main_page(client: WBClient) -> None:
 
     st.caption(
         f"Дата создания поставки: {date_filter_text}. "
-        f"Поставок, подходящих под фильтры: {len(visible_ids)}."
+        f"Найдено поставок: {len(visible_ids)}."
     )
 
     widget_key = (
@@ -1011,8 +1126,6 @@ def render_main_page(client: WBClient) -> None:
     if not isinstance(saved_selected_ids, list):
         saved_selected_ids = []
 
-    # Уже выбранные поставки остаются в поле выбора, даже если текущий
-    # фильтр даты или поиск временно не показывает их в общем списке.
     option_ids = list(
         dict.fromkeys(
             [
@@ -1035,9 +1148,9 @@ def render_main_page(client: WBClient) -> None:
         placeholder="Выберите минимум две поставки",
     )
 
-    action_col_1, action_col_2 = st.columns([1, 3])
+    clear_col, _ = st.columns([1, 3])
 
-    with action_col_1:
+    with clear_col:
         clear_selection_clicked = st.button(
             "🧹 Очистить выбор",
             use_container_width=True,
@@ -1045,7 +1158,6 @@ def render_main_page(client: WBClient) -> None:
 
     if clear_selection_clicked:
         st.session_state["manual_supply_ids"] = ""
-
         invalidate_result()
         st.session_state["supply_widget_version"] += 1
         st.rerun()
@@ -1082,7 +1194,7 @@ def render_main_page(client: WBClient) -> None:
     st.divider()
     st.subheader("Параметры формирования файла")
 
-    settings_col_1, settings_col_2 = st.columns([1, 1])
+    settings_col_1, settings_col_2 = st.columns(2)
 
     with settings_col_1:
         lookback_days = st.selectbox(
@@ -1090,11 +1202,6 @@ def render_main_page(client: WBClient) -> None:
             options=[7, 31, 90, 180],
             index=0,
             format_func=lambda days: f"Последние {days} дней",
-            help=(
-                "WB выдаёт список заданий интервалами не более "
-                "30 календарных дней. Чем больше период, тем больше "
-                "время ожидания и число запросов."
-            ),
         )
 
     with settings_col_2:
@@ -1151,7 +1258,6 @@ def render_main_page(client: WBClient) -> None:
                     sticker_height=sticker_height,
                 )
 
-                # Общий PDF: разделитель перед каждой группой.
                 full_pdf = make_pdf(
                     groups=summary["groups"],
                     width_mm=sticker_width,
@@ -1159,7 +1265,6 @@ def render_main_page(client: WBClient) -> None:
                     include_group_separators=True,
                 )
 
-                # PDF одного артикула: также начинается с разделителя.
                 article_pdfs: list[tuple[str, bytes]] = []
 
                 for group in summary["groups"]:
@@ -1177,12 +1282,19 @@ def render_main_page(client: WBClient) -> None:
                         )
                     )
 
+                mysklad_xlsx = make_mysklad_xlsx(
+                    summary["groups"]
+                )
+
             st.session_state["result"] = {
                 "signature": result_signature,
                 "summary": summary,
                 "full_pdf": full_pdf,
                 "article_pdfs": article_pdfs,
+                "mysklad_xlsx": mysklad_xlsx,
                 "sticker_size_name": sticker_size_name,
+                "sticker_width": sticker_width,
+                "sticker_height": sticker_height,
             }
 
             st.success(
@@ -1209,7 +1321,7 @@ def render_main_page(client: WBClient) -> None:
 # ============================================================
 
 def main() -> None:
-    """Запускает приложение и выбирает экран входа или рабочий экран."""
+    """Запускает приложение."""
     init_session_state()
 
     users = get_users()
