@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from io import BytesIO
+from typing import Any
 
 from PIL import Image
 from reportlab.lib.units import mm
@@ -19,8 +20,6 @@ ALLOWED_SIZES = (
 
 SEPARATOR_FONT_NAME = "WBSeparatorFont"
 
-# В Streamlit Community Cloud обычно доступен DejaVu Sans.
-# Он поддерживает кириллицу, если артикул содержит русские символы.
 FONT_CANDIDATES = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
@@ -33,9 +32,10 @@ FONT_CANDIDATES = (
 @lru_cache(maxsize=1)
 def get_separator_font_name() -> str:
     """
-    Возвращает шрифт для служебных этикеток.
+    Возвращает Unicode-шрифт для служебной этикетки.
 
-    Если Unicode-шрифт не найден, используется Helvetica-Bold.
+    DejaVu Sans обычно установлен в Streamlit Community Cloud и
+    поддерживает кириллицу. Если шрифт не найден, используется Helvetica.
     """
     if SEPARATOR_FONT_NAME in pdfmetrics.getRegisteredFontNames():
         return SEPARATOR_FONT_NAME
@@ -60,10 +60,9 @@ def get_separator_font_name() -> str:
 
 def article_for_separator(article: str) -> str:
     """
-    Готовит артикул только для служебной этикетки-разделителя.
+    Удаляет префикс NAKL_ только на служебной этикетке.
 
-    Удаляется только начальный префикс NAKL_, без изменения исходных
-    данных WB, таблицы артикулов и названий отдельных PDF.
+    Исходный артикул WB в таблице, XLSX и других данных не изменяется.
     """
     original_article = str(article).strip()
 
@@ -82,12 +81,7 @@ def split_text_by_width(
     font_size: float,
     max_width: float,
 ) -> list[str]:
-    """
-    Разбивает длинный текст на строки без изменения его символов.
-
-    Перенос выполняется посимвольно, потому что артикулы часто состоят
-    из длинных фрагментов с `_`, `-`, цифрами и латинскими буквами.
-    """
+    """Разбивает длинный артикул на строки без изменения символов."""
     if not text:
         return [""]
 
@@ -121,15 +115,9 @@ def get_article_layout(
     font_name: str,
     max_width: float,
 ) -> tuple[float, list[str]]:
-    """
-    Подбирает уменьшенный размер шрифта и переносы для артикула.
-
-    Основной размер уменьшен: ранее поиск начинался с 22 pt,
-    теперь — с 18 pt. Это даёт больше свободного места на этикетке.
-    """
+    """Подбирает размер шрифта и переносы для служебной этикетки."""
     article_text = article_for_separator(article)
 
-    # Уменьшенный размер шрифта для компактной служебной этикетки.
     for font_size in range(18, 6, -1):
         lines = split_text_by_width(
             text=article_text,
@@ -157,13 +145,11 @@ def draw_group_separator(
     page_height: float,
 ) -> None:
     """
-    Рисует компактную служебную этикетку-разделитель.
+    Рисует служебную этикетку группы.
 
-    На этикетке печатаются:
-    - артикул без начального префикса NAKL_;
-    - количество оригинальных стикеров WB.
-
-    Функция завершает текущую страницу PDF.
+    На этикетке:
+    - артикул без начального NAKL_;
+    - количество стикеров WB.
     """
     font_name = get_separator_font_name()
 
@@ -180,8 +166,6 @@ def draw_group_separator(
     article_block_height = len(article_lines) * line_height
 
     quantity_text = f"QTY: {sticker_count}"
-
-    # Ранее было максимум 18 pt. Уменьшено до 15 pt.
     quantity_font_size = min(
         15.0,
         max(10.0, page_height / 10),
@@ -230,9 +214,9 @@ def draw_wb_sticker(
     page_height: float,
 ) -> None:
     """
-    Добавляет одну оригинальную PNG-этикетку WB на отдельную PDF-страницу.
+    Добавляет один оригинальный PNG-стикер WB на отдельную страницу PDF.
 
-    Изображение WB не обрезается, не растягивается и не перерисовывается.
+    Изображение не отражается, не обрезается и не перерисовывается.
     """
     if not isinstance(png_bytes, bytes) or not png_bytes:
         raise ValueError(
@@ -257,7 +241,6 @@ def draw_wb_sticker(
         image_ratio = image_width / image_height
         page_ratio = page_width / page_height
 
-        # Нельзя растягивать или обрезать QR/штрихкод.
         if abs(image_ratio - page_ratio) > 0.01:
             raise ValueError(
                 "Пропорции стикера WB не соответствуют "
@@ -283,45 +266,23 @@ def draw_wb_sticker(
         ) from error
 
 
-def make_pdf(
+def build_pdf_pages(
     groups: list[dict],
-    width_mm: int = 58,
-    height_mm: int = 40,
-    include_group_separators: bool = False,
-) -> bytes:
+    include_group_separators: bool,
+) -> list[dict[str, Any]]:
     """
-    Создаёт PDF для печати стикеров WB.
+    Собирает логический порядок PDF-страниц.
 
-    Один оригинальный стикер WB — одна страница PDF.
+    Обычная последовательность группы:
 
-    Если `include_group_separators=True`, перед каждой группой артикулов,
-    включая первую, добавляется служебная этикетка с артикулом без
-    начального префикса NAKL_ и количеством стикеров.
+    1. Служебная этикетка артикула;
+    2. Первый оригинальный WB-стикер;
+    3. Второй оригинальный WB-стикер;
+    4. И так далее.
 
-    Оригинальные стикеры WB не изменяются.
+    При reverse_page_order список страниц будет развёрнут перед печатью.
     """
-    if (width_mm, height_mm) not in ALLOWED_SIZES:
-        raise ValueError(
-            "Допустимы только размеры 58×40 или 40×30 мм."
-        )
-
-    if not groups:
-        raise ValueError(
-            "Нельзя создать PDF без групп стикеров."
-        )
-
-    output = BytesIO()
-
-    page_width = width_mm * mm
-    page_height = height_mm * mm
-
-    pdf = canvas.Canvas(
-        output,
-        pagesize=(page_width, page_height),
-        pageCompression=1,
-    )
-
-    sticker_pages_count = 0
+    pages: list[dict[str, Any]] = []
 
     for group in groups:
         if not isinstance(group, dict):
@@ -354,26 +315,109 @@ def make_pdf(
                 f"у артикула `{article}`."
             )
 
-        sticker_count = len(stickers)
-
         if include_group_separators:
-            draw_group_separator(
-                pdf=pdf,
-                article=article,
-                sticker_count=sticker_count,
-                page_width=page_width,
-                page_height=page_height,
+            pages.append(
+                {
+                    "type": "separator",
+                    "article": article,
+                    "sticker_count": len(stickers),
+                }
             )
 
         for png_bytes in stickers:
-            draw_wb_sticker(
+            pages.append(
+                {
+                    "type": "sticker",
+                    "png_bytes": png_bytes,
+                }
+            )
+
+    return pages
+
+
+def make_pdf(
+    groups: list[dict],
+    width_mm: int = 58,
+    height_mm: int = 40,
+    include_group_separators: bool = False,
+    reverse_page_order: bool = False,
+) -> bytes:
+    """
+    Создаёт PDF для печати оригинальных WB-стикеров.
+
+    Один стикер — одна страница PDF.
+
+    Если `include_group_separators=True`, перед каждой группой,
+    включая первую, добавляется служебная этикетка с артикулом.
+
+    Если `reverse_page_order=True`, порядок PDF-страниц разворачивается.
+    Это удобно для рулонной печати: при последующей размотке ленты
+    сборщик видит обычный логический порядок групп.
+
+    Изображения WB не отражаются и не меняются — меняется только
+    очередность страниц PDF.
+    """
+    if (width_mm, height_mm) not in ALLOWED_SIZES:
+        raise ValueError(
+            "Допустимы только размеры 58×40 или 40×30 мм."
+        )
+
+    if not groups:
+        raise ValueError(
+            "Нельзя создать PDF без групп стикеров."
+        )
+
+    pages = build_pdf_pages(
+        groups=groups,
+        include_group_separators=include_group_separators,
+    )
+
+    if not pages:
+        raise ValueError(
+            "PDF не создан: в группах отсутствуют стикеры."
+        )
+
+    if reverse_page_order:
+        pages.reverse()
+
+    output = BytesIO()
+
+    page_width = width_mm * mm
+    page_height = height_mm * mm
+
+    pdf = canvas.Canvas(
+        output,
+        pagesize=(page_width, page_height),
+        pageCompression=1,
+    )
+
+    sticker_pages_count = 0
+
+    for page in pages:
+        page_type = page["type"]
+
+        if page_type == "separator":
+            draw_group_separator(
                 pdf=pdf,
-                png_bytes=png_bytes,
+                article=page["article"],
+                sticker_count=page["sticker_count"],
                 page_width=page_width,
                 page_height=page_height,
             )
 
+        elif page_type == "sticker":
+            draw_wb_sticker(
+                pdf=pdf,
+                png_bytes=page["png_bytes"],
+                page_width=page_width,
+                page_height=page_height,
+            )
             sticker_pages_count += 1
+
+        else:
+            raise ValueError(
+                "Неизвестный тип страницы при создании PDF."
+            )
 
     if sticker_pages_count == 0:
         raise ValueError(

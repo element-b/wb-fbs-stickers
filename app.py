@@ -22,6 +22,11 @@ STICKER_SIZES = {
     "40 × 30 мм": (40, 30),
 }
 
+PRINT_ORDER_OPTIONS = {
+    "Для рулона — обратный порядок": True,
+    "Обычный порядок": False,
+}
+
 
 # ============================================================
 # НАСТРОЙКА СТРАНИЦЫ
@@ -259,7 +264,7 @@ def init_session_state() -> None:
 
 
 def invalidate_result() -> None:
-    """Удаляет PDF и результаты текущей сформированной партии."""
+    """Удаляет PDF и данные ранее сформированной партии."""
     st.session_state["result"] = None
     st.session_state["reprint_lookup_key"] = None
     st.session_state["reprint_lookup_error"] = None
@@ -295,7 +300,10 @@ def get_users() -> dict[str, str]:
         st.error("В таблице `[users]` нет ни одного пользователя.")
         st.stop()
 
-    if any(not username.strip() or not password for username, password in users.items()):
+    if any(
+        not username.strip() or not password
+        for username, password in users.items()
+    ):
         st.error(
             "У одного или нескольких пользователей в Secrets указан "
             "пустой логин или пароль."
@@ -332,7 +340,7 @@ def authenticate(
 
 
 def render_login_page(users: dict[str, str]) -> None:
-    """Отображает страницу входа без заголовка."""
+    """Отображает страницу входа."""
     apply_login_styles()
 
     st.markdown("<br><br><br><br><br>", unsafe_allow_html=True)
@@ -401,7 +409,7 @@ def parse_created_at(value: object) -> datetime | None:
 
 
 def supply_is_done(supply: dict) -> bool:
-    """Возвращает признак завершённой поставки WB."""
+    """Проверяет признак завершённой поставки WB."""
     value = supply.get("done", False)
 
     if isinstance(value, bool):
@@ -411,7 +419,7 @@ def supply_is_done(supply: dict) -> bool:
 
 
 def format_supply_label(supply: dict) -> str:
-    """Создаёт подпись поставки для списка выбора."""
+    """Формирует подпись поставки для выпадающего списка."""
     supply_id = str(supply.get("id", "")).strip()
     name = str(supply.get("name") or "Без названия").strip()
 
@@ -432,7 +440,7 @@ def format_supply_label(supply: dict) -> str:
 
 
 def value_to_date(value: object) -> date | None:
-    """Безопасно преобразует значение Streamlit в date."""
+    """Преобразует значение Streamlit в объект date."""
     if isinstance(value, datetime):
         return value.date()
 
@@ -445,7 +453,7 @@ def value_to_date(value: object) -> date | None:
 def parse_date_range(
     selected_value: object,
 ) -> tuple[date | None, date | None]:
-    """Получает начальную и конечную дату из date_input."""
+    """Получает начальную и конечную дату из Streamlit date_input."""
     if isinstance(selected_value, (tuple, list)):
         values = list(selected_value)
 
@@ -482,7 +490,7 @@ def supply_matches_filters(
     date_to: date | None,
     status_filter: str,
 ) -> bool:
-    """Проверяет, должна ли поставка быть показана в списке."""
+    """Проверяет, подходит ли поставка текущим фильтрам."""
     if status_filter == "Только активные" and supply_is_done(supply):
         return False
 
@@ -542,17 +550,17 @@ def sort_supply_ids(
 
 
 # ============================================================
-# ПЕРЕПЕЧАТКА ПО КОДУ СТИКЕРА
+# ПЕРЕПЕЧАТКА ПО КОДУ
 # ============================================================
 
 def parse_sticker_code(value: str) -> str | None:
     """
-    Принимает код формата:
+    Принимает код в форматах:
 
-    - 231648 9753
-    - 231648-9753
-    - 231648/9753
-    - 231648,9753
+    - 231648 9753;
+    - 231648-9753;
+    - 231648/9753;
+    - 231648,9753.
     """
     match = re.fullmatch(
         r"\s*(\d+)\s*[\s,;/\-]+\s*(\d+)\s*",
@@ -566,11 +574,7 @@ def parse_sticker_code(value: str) -> str | None:
 
 
 def render_reprint_search(result: dict) -> None:
-    """
-    Отображает поиск и перепечатку одного стикера.
-
-    Поиск работает по стикерам текущей сформированной партии.
-    """
+    """Отображает поиск и перепечатку стикера текущей партии."""
     summary = result["summary"]
     lookup = summary.get("sticker_lookup", {})
 
@@ -579,7 +583,7 @@ def render_reprint_search(result: dict) -> None:
 
     st.caption(
         "Введите две цифровые части со стикера, например: `231648 9753`. "
-        "Поиск выполняется только в текущей сформированной партии."
+        "Поиск выполняется среди стикеров текущей сформированной партии."
     )
 
     search_col, button_col = st.columns([3, 1])
@@ -632,8 +636,7 @@ def render_reprint_search(result: dict) -> None:
             )
         else:
             st.error(
-                "Стикер с таким кодом не найден среди текущей "
-                "сформированной партии."
+                "Стикер с таким кодом не найден среди текущей партии."
             )
         return
 
@@ -645,10 +648,10 @@ def render_reprint_search(result: dict) -> None:
         f"Найден стикер: `{lookup_key}`. Артикул: `{article}`."
     )
 
-    details_col, print_col = st.columns([2, 1])
+    info_col, print_col = st.columns([2, 1])
 
-    with details_col:
-        st.markdown("**СЦ, куда отправляется этот артикул:**")
+    with info_col:
+        st.markdown("**СЦ, куда отправляется данный артикул:**")
 
         if destinations:
             for center in destinations:
@@ -658,7 +661,8 @@ def render_reprint_search(result: dict) -> None:
 
         st.caption(
             f"ID сборочного задания: {order_id}. "
-            "В PDF будет служебная этикетка и один оригинальный стикер WB."
+            "В PDF будет служебная этикетка и один оригинальный "
+            "стикер WB."
         )
 
     with print_col:
@@ -674,6 +678,7 @@ def render_reprint_search(result: dict) -> None:
                 width_mm=result["sticker_width"],
                 height_mm=result["sticker_height"],
                 include_group_separators=True,
+                reverse_page_order=result["reverse_print_order"],
             )
 
             render_open_pdf_button(
@@ -686,16 +691,11 @@ def render_reprint_search(result: dict) -> None:
 
 
 # ============================================================
-# РЕЗУЛЬТАТЫ И ФАЙЛЫ
+# РЕЗУЛЬТАТЫ И ВЫГРУЗКА
 # ============================================================
 
 def build_article_table(summary: dict) -> pd.DataFrame:
-    """
-    Строит таблицу: одна строка — один артикул.
-
-    СЦ назначения — объединённый список СЦ из выбранных поставок,
-    где встретился этот артикул.
-    """
+    """Строит таблицу артикулов с количеством и СЦ назначения."""
     rows = []
 
     for group in summary["groups"]:
@@ -714,7 +714,7 @@ def build_article_table(summary: dict) -> pd.DataFrame:
 
 
 def render_results(result: dict) -> None:
-    """Показывает список артикулов, СЦ и ссылки на PDF."""
+    """Отображает итоговую таблицу, перепечатку и ссылки на PDF."""
     summary = result["summary"]
 
     st.divider()
@@ -734,7 +734,7 @@ def render_results(result: dict) -> None:
         )
 
     st.caption(
-        "СЦ определяется из названия поставки. Например: "
+        "СЦ определяется из названия поставки. Пример: "
         "`Накл Софьино от 26.09.2026` → `Софьино`."
     )
 
@@ -832,9 +832,19 @@ def render_results(result: dict) -> None:
     st.divider()
     st.subheader("📄 Общий файл и выгрузка в МойСклад")
 
+    if result["reverse_print_order"]:
+        order_caption = (
+            "PDF сформирован в обратном порядке страниц для рулонной "
+            "печати. При размотке ленты порядок групп будет рабочим."
+        )
+    else:
+        order_caption = (
+            "PDF сформирован в обычном порядке страниц."
+        )
+
     st.caption(
-        "Общий PDF: перед каждой группой печатается служебная этикетка, "
-        "затем идут оригинальные стикеры WB."
+        "Перед каждой группой печатается служебная этикетка, затем идут "
+        "оригинальные стикеры WB. " + order_caption
     )
 
     timestamp = datetime.now(MOSCOW_TZ).strftime("%Y%m%d_%H%M%S")
@@ -863,15 +873,16 @@ def render_results(result: dict) -> None:
         )
 
     st.caption(
-        "XLSX содержит два столбца для импорта: `Артикул` и `Количество`."
+        "XLSX содержит столбцы: `Артикул`, `Количество`, "
+        "`СЦ назначения`."
     )
 
     st.divider()
     st.subheader("🔗 Стикеры по отдельным артикулам")
 
     st.caption(
-        "PDF каждого артикула начинается со служебной этикетки "
-        "с названием артикула и количеством стикеров."
+        "Каждый PDF начинается со служебной этикетки. "
+        "Для рулонной печати PDF также сформирован в обратном порядке."
     )
 
     article_pdf_by_name = dict(result["article_pdfs"])
@@ -930,7 +941,7 @@ def render_results(result: dict) -> None:
 
     st.warning(
         f"Размер страницы PDF: {result['sticker_size_name']}. "
-        "Перед рабочей печатью проверьте пробную этикетку. "
+        "Перед рабочей печатью выполните пробу на нескольких стикерах. "
         "В окне печати выберите масштаб 100% / «Фактический размер» "
         "и отключите «Подогнать под страницу»."
     )
@@ -958,7 +969,7 @@ def render_sidebar() -> None:
             2. Выберите дату или диапазон.
             3. Выберите поставки.
             4. Сформируйте файлы.
-            5. Откройте PDF нужного артикула.
+            5. Печатайте PDF в режиме для рулона.
             """
         )
 
@@ -985,9 +996,9 @@ def render_main_page(client: WBClient) -> None:
     st.markdown(
         """
         <div class="description-box">
-            Выберите несколько поставок WB. Приложение сгруппирует
-            оригинальные стикеры WB по артикулам, покажет СЦ назначения
-            и подготовит общий PDF, отдельные PDF и XLSX для МойСклад.
+            Выберите поставки WB. Приложение сгруппирует оригинальные
+            стикеры по артикулам, покажет СЦ назначения, создаст PDF для
+            рулонной печати и XLSX для МойСклад.
         </div>
         """,
         unsafe_allow_html=True,
@@ -1003,12 +1014,13 @@ def render_main_page(client: WBClient) -> None:
 
     with info_col:
         st.caption(
-            "После обновления поставок ранее сформированные файлы "
-            "удаляются из текущей сессии."
+            "После обновления списка поставок сформированные ранее "
+            "файлы удаляются из текущей сессии."
         )
 
     if load_clicked:
         invalidate_result()
+
         st.session_state["supplies"] = None
         st.session_state["manual_supply_ids"] = ""
         st.session_state["supply_widget_version"] += 1
@@ -1194,7 +1206,9 @@ def render_main_page(client: WBClient) -> None:
     st.divider()
     st.subheader("Параметры формирования файла")
 
-    settings_col_1, settings_col_2 = st.columns(2)
+    settings_col_1, settings_col_2, settings_col_3 = st.columns(
+        [1, 1, 1.5]
+    )
 
     with settings_col_1:
         lookback_days = st.selectbox(
@@ -1211,7 +1225,20 @@ def render_main_page(client: WBClient) -> None:
             index=0,
         )
 
+    with settings_col_3:
+        print_order_label = st.selectbox(
+            "Порядок печати",
+            options=list(PRINT_ORDER_OPTIONS.keys()),
+            index=0,
+            help=(
+                "Для рулона используется обратный порядок PDF-страниц. "
+                "Это упрощает намотку длинной ленты."
+            ),
+        )
+
     sticker_width, sticker_height = STICKER_SIZES[sticker_size_name]
+
+    reverse_print_order = PRINT_ORDER_OPTIONS[print_order_label]
 
     selected_supplies = [
         supply_by_id.get(supply_id, {"id": supply_id})
@@ -1223,6 +1250,7 @@ def render_main_page(client: WBClient) -> None:
         lookback_days,
         sticker_width,
         sticker_height,
+        reverse_print_order,
     )
 
     current_result = st.session_state.get("result")
@@ -1263,6 +1291,7 @@ def render_main_page(client: WBClient) -> None:
                     width_mm=sticker_width,
                     height_mm=sticker_height,
                     include_group_separators=True,
+                    reverse_page_order=reverse_print_order,
                 )
 
                 article_pdfs: list[tuple[str, bytes]] = []
@@ -1273,6 +1302,7 @@ def render_main_page(client: WBClient) -> None:
                         width_mm=sticker_width,
                         height_mm=sticker_height,
                         include_group_separators=True,
+                        reverse_page_order=reverse_print_order,
                     )
 
                     article_pdfs.append(
@@ -1295,6 +1325,7 @@ def render_main_page(client: WBClient) -> None:
                 "sticker_size_name": sticker_size_name,
                 "sticker_width": sticker_width,
                 "sticker_height": sticker_height,
+                "reverse_print_order": reverse_print_order,
             }
 
             st.success(
