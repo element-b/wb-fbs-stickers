@@ -10,17 +10,20 @@ def make_mysklad_xlsx(groups: list[dict]) -> bytes:
     """
     Создаёт XLSX-файл для работы с МойСклад.
 
-    Столбец «Артикул»:
-    - каждый артикул повторяется по одному разу на каждое
-      сборочное задание / стикер WB.
+    Столбцы:
 
-    Столбец «СЦ назначения»:
-    - содержит уникальные названия СЦ;
-    - каждое название записывается только один раз;
-    - это отдельный список, который можно вручную скопировать
-      в комментарий отгрузки в МойСклад.
+    - Артикул:
+      один раз для каждого уникального артикула;
 
-    Столбец «Количество» намеренно не создаётся.
+    - Количество:
+      количество сборочных заданий / оригинальных стикеров WB
+      для соответствующего артикула;
+
+    - СЦ назначения:
+      независимый список уникальных СЦ из выбранных поставок.
+      Список нужен для ручного копирования в комментарий отгрузки.
+
+    Третий столбец не является построчной связью с артикулом.
     """
     if not groups:
         raise ValueError(
@@ -45,6 +48,7 @@ def make_mysklad_xlsx(groups: list[dict]) -> bytes:
     worksheet.append(
         [
             "Артикул",
+            "Количество",
             "СЦ назначения",
         ]
     )
@@ -57,7 +61,7 @@ def make_mysklad_xlsx(groups: list[dict]) -> bytes:
             vertical="center",
         )
 
-    article_rows: list[str] = []
+    article_rows: list[tuple[str, int]] = []
     unique_centers: list[str] = []
     seen_centers: set[str] = set()
 
@@ -73,11 +77,17 @@ def make_mysklad_xlsx(groups: list[dict]) -> bytes:
 
         if not isinstance(order_ids, list) or not order_ids:
             raise ValueError(
-                f"Нельзя создать XLSX: отсутствуют задания у `{article}`."
+                f"Нельзя создать XLSX: отсутствуют задания "
+                f"у артикула `{article}`."
             )
 
-        # Артикул повторяется по одному разу на каждый стикер.
-        article_rows.extend([article] * len(order_ids))
+        # Одна строка на артикул, количество привязано к нему.
+        article_rows.append(
+            (
+                article,
+                len(order_ids),
+            )
+        )
 
         if not isinstance(centers, list):
             centers = []
@@ -88,6 +98,8 @@ def make_mysklad_xlsx(groups: list[dict]) -> bytes:
             if not center_text:
                 continue
 
+            # СЦ уникализируются без учёта регистра,
+            # но в XLSX сохраняется исходное написание.
             center_key = center_text.casefold()
 
             if center_key in seen_centers:
@@ -101,17 +113,19 @@ def make_mysklad_xlsx(groups: list[dict]) -> bytes:
             "Нельзя создать XLSX без строк с артикулами."
         )
 
+    # Первые два столбца — список артикулов с количеством.
+    # Третий столбец — независимый вертикальный список уникальных СЦ.
     max_rows = max(
         len(article_rows),
         len(unique_centers),
     )
 
     for index in range(max_rows):
-        article = (
-            article_rows[index]
-            if index < len(article_rows)
-            else ""
-        )
+        if index < len(article_rows):
+            article, quantity = article_rows[index]
+        else:
+            article = ""
+            quantity = ""
 
         center = (
             unique_centers[index]
@@ -122,6 +136,7 @@ def make_mysklad_xlsx(groups: list[dict]) -> bytes:
         worksheet.append(
             [
                 article,
+                quantity,
                 center,
             ]
         )
@@ -130,13 +145,14 @@ def make_mysklad_xlsx(groups: list[dict]) -> bytes:
     worksheet.auto_filter.ref = worksheet.dimensions
 
     worksheet.column_dimensions["A"].width = 42
-    worksheet.column_dimensions["B"].width = 34
+    worksheet.column_dimensions["B"].width = 16
+    worksheet.column_dimensions["C"].width = 34
 
     for row in worksheet.iter_rows(
         min_row=2,
         max_row=worksheet.max_row,
         min_col=1,
-        max_col=2,
+        max_col=3,
     ):
         row[0].alignment = Alignment(
             horizontal="left",
@@ -144,6 +160,11 @@ def make_mysklad_xlsx(groups: list[dict]) -> bytes:
         )
 
         row[1].alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+        )
+
+        row[2].alignment = Alignment(
             horizontal="left",
             vertical="center",
             wrap_text=True,
