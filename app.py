@@ -248,7 +248,7 @@ def apply_login_styles() -> None:
 # ============================================================
 
 def init_session_state() -> None:
-    """Создаёт начальные значения состояния пользовательской сессии."""
+    """Создаёт начальные значения пользовательской сессии."""
     defaults = {
         "authenticated": False,
         "supplies": None,
@@ -419,7 +419,7 @@ def supply_is_done(supply: dict) -> bool:
 
 
 def format_supply_label(supply: dict) -> str:
-    """Формирует подпись поставки для выпадающего списка."""
+    """Формирует подпись поставки для списка выбора."""
     supply_id = str(supply.get("id", "")).strip()
     name = str(supply.get("name") or "Без названия").strip()
 
@@ -461,6 +461,7 @@ def parse_date_range(
             return None, None
 
         date_from = value_to_date(values[0])
+
         date_to = (
             value_to_date(values[1])
             if len(values) > 1
@@ -873,8 +874,8 @@ def render_results(result: dict) -> None:
         )
 
     st.caption(
-        "XLSX содержит столбцы: `Артикул`, `Количество`, "
-        "`СЦ назначения`."
+        "XLSX содержит: `Артикул` поштучно и отдельный список "
+        "уникальных `СЦ назначения`."
     )
 
     st.divider()
@@ -904,12 +905,16 @@ def render_results(result: dict) -> None:
 
     with header_1:
         st.caption("**Артикул**")
+
     with header_2:
         st.caption("**Стик.**")
+
     with header_3:
         st.caption("**Пост.**")
+
     with header_4:
         st.caption("**СЦ**")
+
     with header_5:
         st.caption("**PDF**")
 
@@ -997,8 +1002,8 @@ def render_main_page(client: WBClient) -> None:
         """
         <div class="description-box">
             Выберите поставки WB. Приложение сгруппирует оригинальные
-            стикеры по артикулам, покажет СЦ назначения, создаст PDF для
-            рулонной печати и XLSX для МойСклад.
+            стикеры по артикулам, покажет СЦ назначения, создаст PDF
+            для рулонной печати и XLSX для МойСклад.
         </div>
         """,
         unsafe_allow_html=True,
@@ -1022,7 +1027,6 @@ def render_main_page(client: WBClient) -> None:
         invalidate_result()
 
         st.session_state["supplies"] = None
-        st.session_state["manual_supply_ids"] = ""
         st.session_state["supply_widget_version"] += 1
 
         try:
@@ -1138,6 +1142,8 @@ def render_main_page(client: WBClient) -> None:
     if not isinstance(saved_selected_ids, list):
         saved_selected_ids = []
 
+    # Выбранные поставки остаются в поле, даже если текущий фильтр
+    # временно скрывает их из общего списка.
     option_ids = list(
         dict.fromkeys(
             [
@@ -1169,31 +1175,11 @@ def render_main_page(client: WBClient) -> None:
         )
 
     if clear_selection_clicked:
-        st.session_state["manual_supply_ids"] = ""
         invalidate_result()
         st.session_state["supply_widget_version"] += 1
         st.rerun()
 
-    manual_ids_text = st.text_input(
-        "Добавить ID поставки вручную, через запятую",
-        placeholder="Например: WB-GI-1234567, WB-GI-1234568",
-        key="manual_supply_ids",
-    )
-
-    manual_ids = [
-        value.strip()
-        for value in manual_ids_text.split(",")
-        if value.strip()
-    ]
-
-    all_ids = list(
-        dict.fromkeys(
-            [
-                *selected_ids,
-                *manual_ids,
-            ]
-        )
-    )
+    all_ids = list(dict.fromkeys(selected_ids))
 
     if all_ids:
         st.success(f"Выбрано поставок: {len(all_ids)}")
@@ -1241,8 +1227,9 @@ def render_main_page(client: WBClient) -> None:
     reverse_print_order = PRINT_ORDER_OPTIONS[print_order_label]
 
     selected_supplies = [
-        supply_by_id.get(supply_id, {"id": supply_id})
+        supply_by_id[supply_id]
         for supply_id in all_ids
+        if supply_id in supply_by_id
     ]
 
     result_signature = (
