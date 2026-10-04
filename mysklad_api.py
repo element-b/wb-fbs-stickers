@@ -3,7 +3,6 @@ from __future__ import annotations
 import math
 import re
 import time
-from typing import Any
 
 import requests
 
@@ -34,7 +33,7 @@ class MySkladApiError(RuntimeError):
 
 
 def _as_number(value: object) -> float:
-    """Преобразует числовое значение API МоегоСклада."""
+    """Преобразует количество API МоегоСклада в число."""
     try:
         return float(value)
     except (TypeError, ValueError) as error:
@@ -45,10 +44,10 @@ def _as_number(value: object) -> float:
 
 def _to_piece_count(value: float) -> int:
     """
-    Преобразует остаток в целое число штук.
+    Преобразует остаток в число штук.
 
-    Положительная дробная часть округляется вниз: нельзя отправить
-    на упаковку больше единиц, чем фактически доступно.
+    Положительные дробные значения округляются вниз, чтобы план
+    не показывал больше готовой продукции, чем есть фактически.
     """
     if value >= 0:
         return int(math.floor(value))
@@ -60,12 +59,13 @@ class MySkladClient:
     """
     Клиент JSON API МоегоСклада 1.2.
 
-    Первый этап использует только GET-запросы:
+    На первом этапе выполняет только GET-запросы:
 
-    - получение карточки склада;
-    - получение отчёта «Остатки по складам».
+    - карточка склада;
+    - отчёт «Остатки по складам».
 
-    Резервы намеренно не участвуют в расчёте.
+    Для планирования используется только физический остаток `stock`.
+    Поля `reserve` и `quantity` не используются.
     """
 
     def __init__(
@@ -105,7 +105,7 @@ class MySkladClient:
         response: requests.Response,
         attempt: int,
     ) -> float:
-        """Определяет задержку перед повторным запросом."""
+        """Определяет безопасную задержку перед повторным запросом."""
         retry_after = (
             response.headers.get("X-Lognex-Retry-After")
             or response.headers.get("Retry-After")
@@ -127,7 +127,7 @@ class MySkladClient:
         path: str,
         params: dict[str, object] | None = None,
     ) -> dict:
-        """Выполняет GET-запрос с ограниченными повторами."""
+        """Выполняет GET-запрос к МоемСкладу с повторами."""
         url = f"{BASE_URL}{path}"
 
         for attempt in range(self.retries + 1):
@@ -145,7 +145,8 @@ class MySkladClient:
                 if attempt >= self.retries:
                     raise MySkladApiError(
                         "Сетевая ошибка при обращении к API МоегоСклада. "
-                        "Проверьте интернет-подключение и повторите позже."
+                        "Проверьте подключение к интернету "
+                        "и повторите позже."
                     )
 
                 time.sleep(min(float(2 ** attempt), 8.0))
@@ -207,7 +208,7 @@ class MySkladClient:
         """
         Получает все строки стандартной пагинации limit/offset.
 
-        Максимальный размер страницы МоегоСклада — 1000 строк.
+        Максимальный размер одной страницы МоегоСклада — 1000 строк.
         """
         result: list[dict] = []
         offset = 0
@@ -249,7 +250,7 @@ class MySkladClient:
 
     @staticmethod
     def _validate_store_id(store_id: str) -> str:
-        """Проверяет формат UUID склада."""
+        """Проверяет формат UUID склада из Streamlit Secrets."""
         clean_store_id = store_id.strip()
 
         if not UUID_PATTERN.fullmatch(clean_store_id):
@@ -262,16 +263,13 @@ class MySkladClient:
         return clean_store_id
 
     @staticmethod
-    def _meta_matches_store(
+    def _store_matches(
         meta: object,
         store_id: str,
     ) -> bool:
-        """Проверяет, относится ли meta-объект к выбранному складу."""
+        """Проверяет, относится ли остаток к выбранному складу."""
         if not isinstance(meta, dict):
             return False
-
-        if str(meta.get("id") or "").strip() == store_id:
-            return True
 
         href = str(meta.get("href") or "").rstrip("/")
 
@@ -299,18 +297,15 @@ class MySkladClient:
         """
         Возвращает физические остатки по артикулам выбранного склада.
 
-        Используется отчёт МоегоСклада:
+        Используется отчёт:
 
         GET /report/stock/bystore
 
-        В строке отчёта находится список `stockByStore`.
-        Код дополнительно проверяет UUID склада внутри этого списка,
-        поэтому остатки других складов не попадают в расчёт.
+        В ответе каждой позиции есть список `stockByStore`.
+        В расчёт добавляется значение `stock` только для склада,
+        UUID которого задан в Secrets.
 
-        Важно:
-        - используется только `stock`;
-        - `reserve` намеренно игнорируется;
-        - `quantity` намеренно игнорируется.
+        Поля `reserve`, `quantity` и `inTransit` не учитываются.
         """
         clean_store_id = self._validate_store_id(store_id)
 
@@ -321,9 +316,11 @@ class MySkladClient:
         rows = self._list_rows(
             path="/report/stock/bystore",
             params={
-                "filter": f"store={store_href}",
+                "filter": (
+                    f"store={store_href};"
+                    "stockMode=all"
+                ),
                 "groupBy": "variant",
-                "stockMode": "all",
             },
         )
 
@@ -351,7 +348,7 @@ class MySkladClient:
                 if not isinstance(store_stock, dict):
                     continue
 
-                if not self._meta_matches_store(
+                if not self._store_matches(
                     meta=store_stock.get("meta"),
                     store_id=clean_store_id,
                 ):
@@ -365,10 +362,9 @@ class MySkladClient:
                 selected_store_stock += _as_number(
                     store_stock["stock"]
                 )
+
                 selected_store_found = True
 
-            # Ответ был отфильтрован по складу. Если строка всё же не
-            # содержит выбранный склад, её нельзя безопасно учитывать.
             if not selected_store_found:
                 continue
 

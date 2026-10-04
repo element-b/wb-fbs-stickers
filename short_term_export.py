@@ -44,7 +44,7 @@ NORMAL_FILL = PatternFill(
 
 
 def _priority_fill(value: object) -> PatternFill | None:
-    """Возвращает цвет строки XLSX по приоритету."""
+    """Возвращает цвет строки XLSX по производственному приоритету."""
     text = str(value or "")
 
     if text.startswith("🔴"):
@@ -66,7 +66,7 @@ def _append_dataframe(
     worksheet,
     dataframe: pd.DataFrame,
 ) -> None:
-    """Записывает таблицу на лист XLSX и оформляет её."""
+    """Записывает DataFrame на лист XLSX с оформлением."""
     columns = dataframe.columns.tolist()
 
     worksheet.append(columns)
@@ -88,7 +88,9 @@ def _append_dataframe(
             ]
         )
 
-        fill = _priority_fill(row.get("Приоритет"))
+        fill = _priority_fill(
+            row.get("Приоритет")
+        )
 
         if fill is not None:
             for cell in worksheet[worksheet.max_row]:
@@ -130,7 +132,7 @@ def make_short_term_plan_xlsx(
     parameters: dict[str, str | int],
 ) -> bytes:
     """
-    Создаёт XLSX краткосрочного плана WB FBS.
+    Создаёт XLSX-файл краткосрочного производственного плана.
 
     Листы:
 
@@ -191,8 +193,9 @@ def make_short_term_plan_xlsx(
 
     parameters_sheet.freeze_panes = "A2"
     parameters_sheet.sheet_view.showGridLines = False
-    parameters_sheet.column_dimensions["A"].width = 40
-    parameters_sheet.column_dimensions["B"].width = 55
+
+    parameters_sheet.column_dimensions["A"].width = 42
+    parameters_sheet.column_dimensions["B"].width = 60
 
     for row in parameters_sheet.iter_rows(
         min_row=2,

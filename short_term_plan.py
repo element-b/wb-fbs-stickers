@@ -16,7 +16,7 @@ class ShortTermPlanResult:
     queue_table: pd.DataFrame
     full_table: pd.DataFrame
     normal_table: pd.DataFrame
-    total_wb_orders: int
+    total_completed_units: int
     total_need_to_finish: int
     critical_count: int
     urgent_count: int
@@ -29,7 +29,7 @@ def _as_nonnegative_int(
     value: object,
     field_name: str,
 ) -> int:
-    """Проверяет количество WB-заказов."""
+    """Проверяет количество завершённых WB FBS-заданий."""
     try:
         number = int(value)
     except (TypeError, ValueError) as error:
@@ -49,9 +49,7 @@ def _priority(
     coverage_days: float,
     need_to_finish: int,
 ) -> tuple[int, str, str]:
-    """
-    Возвращает технический приоритет, статус и рабочую рекомендацию.
-    """
+    """Возвращает приоритет, статус и рекомендацию."""
     if need_to_finish <= 0:
         return (
             4,
@@ -81,23 +79,26 @@ def _priority(
 
 
 def build_short_term_plan(
-    wb_weekly_demand: dict[str, int],
+    completed_fbs_by_article: dict[str, int],
     physical_stock_by_article: dict[str, int],
 ) -> ShortTermPlanResult:
     """
     Формирует краткосрочный план пополнения готовой продукции WB FBS.
 
+    Источник недельной потребности — сборочные задания, входящие
+    в завершённые WB FBS-поставки за последние семь завершённых дней.
+
     Правила первого этапа:
 
-    - спрос — неотменённые WB FBS-заказы за 7 завершённых дней;
-    - цель — восстановить физический остаток до недельного спроса;
-    - резерв МоегоСклада не используется;
+    - целевой остаток равен фактическому выбытию за неделю;
+    - используется только физический остаток `stock`;
+    - reserve и quantity МоегоСклада не используются;
     - рулоны считаются заранее подготовленными;
-    - количество для триммера равно количеству для упаковки.
+    - количество на триммер равно количеству на упаковку.
     """
     normalized_demand: dict[str, int] = {}
 
-    for article, quantity in wb_weekly_demand.items():
+    for article, quantity in completed_fbs_by_article.items():
         clean_article = str(article or "").strip()
 
         if not clean_article:
@@ -105,7 +106,10 @@ def build_short_term_plan(
 
         normalized_demand[clean_article] = _as_nonnegative_int(
             value=quantity,
-            field_name=f"спрос WB для артикула `{clean_article}`",
+            field_name=(
+                "потребление WB FBS "
+                f"для артикула `{clean_article}`"
+            ),
         )
 
     normalized_demand = {
@@ -117,7 +121,7 @@ def build_short_term_plan(
     if not normalized_demand:
         raise ShortTermPlanError(
             "За последние 7 завершённых дней не найдено "
-            "неотменённых WB FBS-заказов."
+            "завершённых WB FBS-поставок с заданиями."
         )
 
     normalized_stock: dict[str, int] = {}
@@ -142,15 +146,15 @@ def build_short_term_plan(
         normalized_demand,
         key=lambda value: (value.casefold(), value),
     ):
-        weekly_demand = normalized_demand[article]
-        average_daily_demand = weekly_demand / 7
+        completed_units = normalized_demand[article]
+        average_daily_demand = completed_units / 7
 
         physical_stock = normalized_stock.get(article, 0)
 
         if article not in normalized_stock:
             missing_stock_articles.append(article)
 
-        target_stock = weekly_demand
+        target_stock = completed_units
 
         need_to_finish = max(
             target_stock - physical_stock,
@@ -174,8 +178,8 @@ def build_short_term_plan(
                 "_coverage_days_raw": coverage_days,
                 "Приоритет": status,
                 "Артикул": article,
-                "WB FBS, заказов за 7 дней": weekly_demand,
-                "Среднее WB FBS в день": round(
+                "WB FBS, завершено за 7 дней": completed_units,
+                "Среднее выбытие WB FBS в день": round(
                     average_daily_demand,
                     2,
                 ),
@@ -197,7 +201,7 @@ def build_short_term_plan(
             row["_priority_number"],
             row["_coverage_days_raw"],
             -row["Нужно довести до готовой продукции"],
-            -row["WB FBS, заказов за 7 дней"],
+            -row["WB FBS, завершено за 7 дней"],
             row["Артикул"].casefold(),
             row["Артикул"],
         )
@@ -206,8 +210,8 @@ def build_short_term_plan(
     visible_columns = [
         "Приоритет",
         "Артикул",
-        "WB FBS, заказов за 7 дней",
-        "Среднее WB FBS в день",
+        "WB FBS, завершено за 7 дней",
+        "Среднее выбытие WB FBS в день",
         "Физический остаток",
         "Покрытие, дней",
         "Целевой остаток, 7 дней",
@@ -239,7 +243,7 @@ def build_short_term_plan(
         queue_table=queue_table,
         full_table=full_table,
         normal_table=normal_table,
-        total_wb_orders=sum(normalized_demand.values()),
+        total_completed_units=sum(normalized_demand.values()),
         total_need_to_finish=int(
             queue_table[
                 "Нужно довести до готовой продукции"
