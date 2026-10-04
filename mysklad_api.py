@@ -297,15 +297,22 @@ class MySkladClient:
         """
         Возвращает физические остатки по артикулам выбранного склада.
 
-        Используется отчёт:
+        Используется расширенный отчёт МоегоСклада:
 
-        GET /report/stock/bystore
+        GET /report/stock/all
 
-        В ответе каждой позиции есть список `stockByStore`.
-        В расчёт добавляется значение `stock` только для склада,
-        UUID которого задан в Secrets.
+        В отличие от `/report/stock/bystore`, этот отчёт содержит
+        артикул товара в поле `article`. Это необходимо для точного
+        сопоставления с артикулом WB.
 
-        Поля `reserve`, `quantity` и `inTransit` не учитываются.
+        В расчёт входят:
+
+        - `article`;
+        - `stock`.
+
+        Поля `reserve`, `quantity`, `inTransit` намеренно не
+        используются, поскольку FBO и FBS пока не разделены
+        на независимые контуры.
         """
         clean_store_id = self._validate_store_id(store_id)
 
@@ -314,12 +321,10 @@ class MySkladClient:
         )
 
         rows = self._list_rows(
-            path="/report/stock/bystore",
+            path="/report/stock/all",
             params={
-                "filter": (
-                    f"store={store_href};"
-                    "stockMode=all"
-                ),
+                "filter": f"store={store_href}",
+                "stockMode": "all",
                 "groupBy": "variant",
             },
         )
@@ -327,50 +332,22 @@ class MySkladClient:
         stock_by_article: dict[str, float] = {}
 
         for row in rows:
-            article = str(row.get("article") or "").strip()
+            article = str(
+                row.get("article") or ""
+            ).strip()
 
-            # Без артикула невозможно сопоставить остаток с WB.
+            # Без артикула остаток нельзя сопоставить с WB.
             if not article:
                 continue
 
-            stock_by_store = row.get("stockByStore")
-
-            if not isinstance(stock_by_store, list):
+            if "stock" not in row:
                 raise MySkladApiError(
-                    "МойСклад вернул строку отчёта без списка "
-                    "`stockByStore`."
+                    "МойСклад вернул строку отчёта без поля `stock`."
                 )
-
-            selected_store_stock = 0.0
-            selected_store_found = False
-
-            for store_stock in stock_by_store:
-                if not isinstance(store_stock, dict):
-                    continue
-
-                if not self._store_matches(
-                    meta=store_stock.get("meta"),
-                    store_id=clean_store_id,
-                ):
-                    continue
-
-                if "stock" not in store_stock:
-                    raise MySkladApiError(
-                        "МойСклад вернул остаток склада без поля `stock`."
-                    )
-
-                selected_store_stock += _as_number(
-                    store_stock["stock"]
-                )
-
-                selected_store_found = True
-
-            if not selected_store_found:
-                continue
 
             stock_by_article[article] = (
                 stock_by_article.get(article, 0.0)
-                + selected_store_stock
+                + _as_number(row["stock"])
             )
 
         return {

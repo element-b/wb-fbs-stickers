@@ -478,24 +478,26 @@ class WBClient:
         self,
         date_from: date,
         date_to: date,
+        supply_name_prefix: str = "Накл",
         order_lookback_days: int = 31,
     ) -> dict[str, int]:
         """
         Возвращает фактическое WB FBS-потребление по артикулам.
 
-        Источник спроса — завершённые WB-поставки:
+        В расчёт попадают только поставки:
 
         - `done = true`;
-        - `closedAt` входит в указанный период;
-        - в расчёт попадают все сборочные задания поставки;
-        - потребление группируется по `article`.
+        - `closedAt` входит в заданный период;
+        - имя поставки начинается с `supply_name_prefix`;
+        - задания поставки имеют заполненный артикул.
 
-        В отличие от Statistics API, метод считает товар, который был
-        фактически собран и выбыл из готовой продукции.
+        Пример фильтра:
 
-        `order_lookback_days` — период поиска данных сборочных заданий.
-        Он больше недельного периода, потому что заказ мог быть создан
-        за несколько дней до закрытия поставки.
+        `Накл Софьино от 26.09.2026` — попадёт;
+        `Трусы Коледино от 26.09.2026` — не попадёт.
+
+        Источник спроса — товары, реально собранные и выбывшие
+        через завершённые WB FBS-поставки.
         """
         if date_from > date_to:
             raise ValueError(
@@ -507,12 +509,28 @@ class WBClient:
                 "Период поиска заданий должен быть не меньше одного дня."
             )
 
+        normalized_prefix = supply_name_prefix.strip()
+
+        if not normalized_prefix:
+            raise ValueError(
+                "Префикс названия WB FBS-поставки не может быть пустым."
+            )
+
+        prefix_key = normalized_prefix.casefold()
+
         supplies = self.list_supplies()
 
         completed_supply_ids: list[str] = []
 
         for supply in supplies:
             if not supply_is_done(supply):
+                continue
+
+            supply_name = str(
+                supply.get("name") or ""
+            ).strip()
+
+            if not supply_name.casefold().startswith(prefix_key):
                 continue
 
             closed_at = parse_wb_datetime(
@@ -542,8 +560,8 @@ class WBClient:
         if not completed_supply_ids:
             return {}
 
-        # ID сборочного задания -> ID завершённой поставки.
-        # Каждое задание должно быть учтено только один раз.
+        # ID задания -> ID поставки.
+        # Нельзя учитывать одно задание дважды.
         order_to_supply: dict[int, str] = {}
 
         for supply_id in completed_supply_ids:
@@ -560,7 +578,7 @@ class WBClient:
                         "WB вернул одно и то же сборочное задание "
                         "в двух завершённых поставках. "
                         "Недельное потребление не рассчитано, "
-                        "чтобы избежать двойного учёта."
+                        "чтобы исключить двойной учёт."
                     )
 
                 order_to_supply[order_id] = supply_id
