@@ -2,16 +2,23 @@ from __future__ import annotations
 
 import hmac
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
 
+from mysklad_api import MySkladApiError, MySkladClient
 from mysklad_export import make_mysklad_xlsx
 from pdf_export import make_pdf
 from pdf_tab import render_open_pdf_button
 from pipeline import DataCheckError, collect_and_group
+from short_term_export import make_short_term_plan_xlsx
+from short_term_plan import (
+    ShortTermPlanError,
+    ShortTermPlanResult,
+    build_short_term_plan,
+)
 from wb_api import WBApiError, WBClient
 
 
@@ -33,7 +40,7 @@ PRINT_ORDER_OPTIONS = {
 # ============================================================
 
 st.set_page_config(
-    page_title="Стикеры WB FBS",
+    page_title="WB FBS",
     page_icon="📦",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -56,7 +63,7 @@ def apply_main_styles() -> None:
 
             .main .block-container {
                 padding: 2rem 3rem 3rem 3rem;
-                max-width: 1450px;
+                max-width: 1550px;
             }
 
             .stApp h1,
@@ -115,6 +122,28 @@ def apply_main_styles() -> None:
                 box-shadow: 0 3px 10px rgba(0, 155, 119, 0.28);
             }
 
+            .stTabs [data-baseweb="tab-list"] {
+                gap: 8px;
+                border-bottom: 1px solid #E5E7EB;
+                margin-bottom: 12px;
+            }
+
+            .stTabs [data-baseweb="tab"] {
+                background-color: #F8FAFC;
+                border: 1px solid #E5E7EB;
+                border-bottom: none;
+                border-radius: 8px 8px 0 0;
+                color: #374151 !important;
+                font-weight: 600;
+                padding: 10px 18px;
+            }
+
+            .stTabs [aria-selected="true"] {
+                background-color: #F2FBF7 !important;
+                color: #007C60 !important;
+                border-color: #009B77 !important;
+            }
+
             div[data-testid="stVerticalBlockBorderWrapper"] {
                 border: 1px solid #E4E4E7 !important;
                 border-radius: 12px !important;
@@ -167,7 +196,7 @@ def apply_main_styles() -> None:
 
 
 def apply_login_styles() -> None:
-    """Стили страницы входа в стиле проекта «Контроль поставок Ozon»."""
+    """Стили страницы входа."""
     st.markdown(
         """
         <style>
@@ -256,6 +285,7 @@ def init_session_state() -> None:
         "supply_widget_version": 0,
         "reprint_lookup_key": None,
         "reprint_lookup_error": None,
+        "short_term_fbs_result": None,
     }
 
     for key, value in defaults.items():
@@ -386,7 +416,19 @@ def logout() -> None:
 
 
 # ============================================================
-# ПОСТАВКИ И ФИЛЬТРЫ
+# ОБЩИЕ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ============================================================
+
+def get_secret(name: str) -> str:
+    """Безопасно читает строковое значение Streamlit Secret."""
+    try:
+        return str(st.secrets[name]).strip()
+    except Exception:
+        return ""
+
+
+# ============================================================
+# ПОСТАВКИ И ФИЛЬТРЫ WB
 # ============================================================
 
 def parse_created_at(value: object) -> datetime | None:
@@ -583,8 +625,9 @@ def render_reprint_search(result: dict) -> None:
     st.subheader("♻️ Найти и перепечатать стикер")
 
     st.caption(
-        "Введите две цифровые части со стикера через пробел, например: `231648 9753`. "
-        "Поиск выполняется среди стикеров текущей сформированной партии."
+        "Введите две цифровые части со стикера через пробел, например: "
+        "`231648 9753`. Поиск выполняется среди стикеров текущей "
+        "сформированной партии."
     )
 
     search_col, button_col = st.columns([3, 1])
@@ -632,8 +675,8 @@ def render_reprint_search(result: dict) -> None:
     if found is None:
         if summary.get("searchable_sticker_count", 0) == 0:
             st.warning(
-                "WB не вернул цифровые части partA и partB для "
-                "стикеров этой партии. Поиск по коду недоступен."
+                "WB не вернул цифровые части partA и partB "
+                "для стикеров этой партии. Поиск по коду недоступен."
             )
         else:
             st.error(
@@ -692,7 +735,7 @@ def render_reprint_search(result: dict) -> None:
 
 
 # ============================================================
-# РЕЗУЛЬТАТЫ И ВЫГРУЗКА
+# РЕЗУЛЬТАТЫ ПЕЧАТИ СТИКЕРОВ
 # ============================================================
 
 def build_article_table(summary: dict) -> pd.DataFrame:
@@ -839,9 +882,7 @@ def render_results(result: dict) -> None:
             "печати. При размотке ленты порядок групп будет рабочим."
         )
     else:
-        order_caption = (
-            "PDF сформирован в обычном порядке страниц."
-        )
+        order_caption = "PDF сформирован в обычном порядке страниц."
 
     st.caption(
         "Перед каждой группой печатается служебная этикетка, затем идут "
@@ -874,8 +915,8 @@ def render_results(result: dict) -> None:
         )
 
     st.caption(
-    "XLSX содержит: `Артикул`, связанное с ним `Количество` "
-    "и отдельный список уникальных `СЦ назначения`."
+        "XLSX содержит: `Артикул`, связанное с ним `Количество` "
+        "и отдельный список уникальных `СЦ назначения`."
     )
 
     st.divider()
@@ -953,49 +994,11 @@ def render_results(result: dict) -> None:
 
 
 # ============================================================
-# БОКОВАЯ ПАНЕЛЬ
+# ВКЛАДКА: СТИКЕРЫ WB FBS
 # ============================================================
 
-def render_sidebar() -> None:
-    """Отображает боковую панель."""
-    with st.sidebar:
-        st.markdown("## 📦 WB FBS")
-        st.caption("Стикеры сборочных заданий")
-        st.caption(
-            "Приложение не меняет поставки, статусы заказов и короба."
-        )
-
-        st.divider()
-
-        st.markdown("**Как пользоваться**")
-        st.markdown(
-            """
-            1. Обновите список поставок WB.
-            2. Выберите дату или диапазон.
-            3. Выберите поставки.
-            4. Сформируйте файлы.
-            5. Печатайте PDF в режиме для рулона.
-            """
-        )
-
-        st.divider()
-
-        if st.button(
-            "⍈ Выйти",
-            use_container_width=True,
-            key="logout_button",
-        ):
-            logout()
-
-
-# ============================================================
-# ОСНОВНОЙ ЭКРАН
-# ============================================================
-
-def render_main_page(client: WBClient) -> None:
-    """Отображает основной рабочий экран."""
-    render_sidebar()
-
+def render_stickers_tab(client: WBClient) -> None:
+    """Отображает существующую вкладку формирования WB-стикеров."""
     st.title("📦 Стикеры сборочных заданий WB FBS")
 
     st.markdown(
@@ -1039,11 +1042,11 @@ def render_main_page(client: WBClient) -> None:
 
     if supplies is None:
         st.info("Нажмите «Загрузить / обновить поставки».")
-        st.stop()
+        return
 
     if not supplies:
         st.warning("WB не вернул доступных поставок.")
-        st.stop()
+        return
 
     supply_by_id: dict[str, dict] = {}
 
@@ -1060,7 +1063,7 @@ def render_main_page(client: WBClient) -> None:
         st.error(
             "WB вернул список поставок без корректных идентификаторов."
         )
-        st.stop()
+        return
 
     st.divider()
     st.subheader("Фильтры списка поставок")
@@ -1142,8 +1145,6 @@ def render_main_page(client: WBClient) -> None:
     if not isinstance(saved_selected_ids, list):
         saved_selected_ids = []
 
-    # Выбранные поставки остаются в поле, даже если текущий фильтр
-    # временно скрывает их из общего списка.
     option_ids = list(
         dict.fromkeys(
             [
@@ -1329,9 +1330,508 @@ def render_main_page(client: WBClient) -> None:
             "Файлы появятся только после успешной полной проверки "
             "выбранных поставок."
         )
-        st.stop()
+        return
 
     render_results(result)
+
+
+# ============================================================
+# ВКЛАДКА: КРАТКОСРОЧНОЕ ПЛАНИРОВАНИЕ WB FBS
+# ============================================================
+
+def ensure_short_term_configuration(
+    mysklad_token: str,
+    store_id: str,
+) -> bool:
+    """
+    Проверяет Secrets, необходимые только для вкладки планирования.
+
+    Возвращает False, а не останавливает всё приложение, чтобы вкладка
+    печати стикеров оставалась доступной даже при неполной настройке
+    МоегоСклада.
+    """
+    missing = []
+
+    if not mysklad_token:
+        missing.append("`MYSKLAD_API_TOKEN`")
+
+    if not store_id:
+        missing.append(
+            "`MYSKLAD_WB_FBS_FINISHED_STORE_ID`"
+        )
+
+    if missing:
+        st.error(
+            "Для краткосрочного планирования не настроены "
+            "Streamlit Secrets: "
+            + ", ".join(missing)
+        )
+        return False
+
+    return True
+
+
+def render_short_term_plan_table(
+    table: pd.DataFrame,
+) -> None:
+    """Показывает таблицу краткосрочной производственной очереди."""
+    st.dataframe(
+        table,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Приоритет": st.column_config.TextColumn(
+                "Приоритет",
+                width="medium",
+            ),
+            "Артикул": st.column_config.TextColumn(
+                "Артикул",
+                width="large",
+            ),
+            "WB FBS, завершено за 7 дней": (
+                st.column_config.NumberColumn(
+                    "WB FBS, завершено за 7 дней",
+                    format="%d",
+                )
+            ),
+            "Среднее выбытие WB FBS в день": (
+                st.column_config.NumberColumn(
+                    "Среднее выбытие WB FBS в день",
+                    format="%.2f",
+                )
+            ),
+            "Физический остаток": (
+                st.column_config.NumberColumn(
+                    "Физический остаток",
+                    format="%d",
+                )
+            ),
+            "Покрытие, дней": (
+                st.column_config.NumberColumn(
+                    "Покрытие, дней",
+                    format="%.2f",
+                )
+            ),
+            "Целевой остаток, 7 дней": (
+                st.column_config.NumberColumn(
+                    "Целевой остаток, 7 дней",
+                    format="%d",
+                )
+            ),
+            "Нужно довести до готовой продукции": (
+                st.column_config.NumberColumn(
+                    "Нужно довести до готовой продукции",
+                    format="%d",
+                )
+            ),
+            "На триммер": st.column_config.NumberColumn(
+                "На триммер",
+                format="%d",
+            ),
+            "На упаковку": st.column_config.NumberColumn(
+                "На упаковку",
+                format="%d",
+            ),
+            "Действие": st.column_config.TextColumn(
+                "Действие",
+                width="large",
+            ),
+        },
+    )
+
+
+def render_short_term_shift_list(
+    result: ShortTermPlanResult,
+) -> None:
+    """Показывает короткую очередь действий для производства."""
+    st.subheader("📋 Краткий план для производства")
+
+    if result.queue_table.empty:
+        st.success(
+            "Все артикулы с WB FBS-потреблением покрыты "
+            "физическим остатком."
+        )
+        return
+
+    st.caption(
+        "На первом этапе предполагается, что рулоны уже готовы. "
+        "Поэтому количество для триммера и упаковки одинаково."
+    )
+
+    for index, row in enumerate(
+        result.queue_table.to_dict(orient="records"),
+        start=1,
+    ):
+        st.markdown(
+            f"{index}. **{row['Артикул']}** — "
+            f"`триммер: {row['На триммер']} шт.` → "
+            f"`упаковка: {row['На упаковку']} шт.` "
+            f"— {row['Приоритет']}."
+        )
+
+
+def render_short_term_plan_tab(client: WBClient) -> None:
+    """
+    Отображает вкладку краткосрочного пополнения WB FBS-остатков.
+
+    Источник потребления:
+    завершённые WB FBS-поставки с именем, начинающимся на «Накл».
+
+    Источник остатков:
+    физический остаток `stock` выбранного склада МоегоСклада.
+
+    Резерв `reserve` намеренно не учитывается.
+    """
+    st.title("⚡ Краткосрочный план WB FBS")
+
+    st.markdown(
+        """
+        <div class="description-box">
+            После утренней сборки WB FBS проведите отгрузку или списание
+            в МоемСкладе. Затем нажмите «Обновить потребности».
+            Приложение сравнит физический остаток готовой продукции
+            с фактическим выбытием товаров через завершённые WB FBS-поставки
+            за последние семь завершённых дней.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    mysklad_token = get_secret("MYSKLAD_API_TOKEN")
+
+    finished_store_id = get_secret(
+        "MYSKLAD_WB_FBS_FINISHED_STORE_ID"
+    )
+
+    supply_name_prefix = (
+        get_secret("WB_FBS_SUPPLY_NAME_PREFIX")
+        or "Накл"
+    )
+
+    if not ensure_short_term_configuration(
+        mysklad_token=mysklad_token,
+        store_id=finished_store_id,
+    ):
+        return
+
+    today = datetime.now(MOSCOW_TZ).date()
+
+    # Семь полностью завершённых календарных дней.
+    # Текущий день намеренно не учитывается.
+    period_end = today - timedelta(days=1)
+    period_start = period_end - timedelta(days=6)
+
+    st.caption(
+        "Период фактического WB FBS-потребления: "
+        f"**{period_start.strftime('%d.%m.%Y')} — "
+        f"{period_end.strftime('%d.%m.%Y')}**. "
+        "В расчёт входят только поставки WB с `done = true`, "
+        "закрытые в этот период, и с названием, начинающимся с "
+        f"`{supply_name_prefix}`."
+    )
+
+    st.caption(
+        "Используется только физический остаток `stock` выбранного "
+        "склада МоегоСклада. Резервы FBO и другие резервы намеренно "
+        "не вычитаются на первом этапе."
+    )
+
+    update_clicked = st.button(
+        "⟳ Обновить потребности",
+        type="primary",
+        use_container_width=True,
+        key="update_short_term_fbs_plan",
+    )
+
+    if update_clicked:
+        mysklad_client = MySkladClient(
+            token=mysklad_token
+        )
+
+        try:
+            with st.spinner(
+                "Получаю остатки МоегоСклада, завершённые "
+                "WB FBS-поставки и артикулы сборочных заданий…"
+            ):
+                store_name = mysklad_client.store_name(
+                    store_id=finished_store_id
+                )
+
+                physical_stock_by_article = (
+                    mysklad_client.finished_stock_by_article(
+                        store_id=finished_store_id
+                    )
+                )
+
+                completed_fbs_by_article = (
+                    client.completed_fbs_demand_by_article(
+                        date_from=period_start,
+                        date_to=period_end,
+                        supply_name_prefix=supply_name_prefix,
+                        order_lookback_days=31,
+                    )
+                )
+
+                result = build_short_term_plan(
+                    completed_fbs_by_article=(
+                        completed_fbs_by_article
+                    ),
+                    physical_stock_by_article=(
+                        physical_stock_by_article
+                    ),
+                )
+
+            st.session_state["short_term_fbs_result"] = {
+                "result": result,
+                "period_start": period_start,
+                "period_end": period_end,
+                "store_name": store_name,
+                "store_id": finished_store_id,
+                "supply_name_prefix": supply_name_prefix,
+                "generated_at": datetime.now(MOSCOW_TZ),
+            }
+
+            st.success(
+                "Потребности WB FBS успешно обновлены."
+            )
+
+        except (
+            WBApiError,
+            MySkladApiError,
+            ShortTermPlanError,
+            ValueError,
+        ) as error:
+            st.error(str(error))
+
+    saved = st.session_state.get(
+        "short_term_fbs_result"
+    )
+
+    if saved is None:
+        st.info(
+            "После проведения утренней сборки в МоемСкладе "
+            "нажмите «Обновить потребности»."
+        )
+        return
+
+    result: ShortTermPlanResult = saved["result"]
+
+    st.divider()
+    st.subheader("📊 Сводка")
+
+    metric_1, metric_2, metric_3, metric_4, metric_5 = st.columns(5)
+
+    metric_1.metric(
+        "Завершено WB FBS за 7 дней",
+        result.total_completed_units,
+    )
+
+    metric_2.metric(
+        "Нужно на триммер",
+        result.total_need_to_finish,
+    )
+
+    metric_3.metric(
+        "Критично: менее 1 дня",
+        result.critical_count,
+    )
+
+    metric_4.metric(
+        "Срочно: 1–2 дня",
+        result.urgent_count,
+    )
+
+    metric_5.metric(
+        "Пополнить: 2–7 дней",
+        result.replenish_count,
+    )
+
+    st.caption(
+        "Склад готовой продукции: "
+        f"`{saved['store_name']}`. "
+        "Префикс WB-поставок: "
+        f"`{saved['supply_name_prefix']}`. "
+        "Данные сформированы: "
+        f"{saved['generated_at'].strftime('%d.%m.%Y %H:%M')} "
+        "по Москве."
+    )
+
+    if result.critical_count > 0:
+        st.error(
+            "Есть критические артикулы с покрытием меньше одного дня. "
+            "Их нужно поставить в начало очереди триммера и упаковки."
+        )
+
+    elif result.urgent_count > 0:
+        st.warning(
+            "Есть срочные артикулы с покрытием от одного до двух дней. "
+            "Их рекомендуется закрыть в текущую смену."
+        )
+
+    elif result.replenish_count > 0:
+        st.info(
+            "Критических дефицитов нет, но часть артикулов нужно "
+            "пополнить до недельного фактического потребления."
+        )
+
+    render_short_term_shift_list(result)
+
+    st.divider()
+    st.subheader("🏭 Производственная очередь")
+
+    if result.queue_table.empty:
+        st.success(
+            "Очередь пуста: все артикулы покрыты "
+            "недельным WB FBS-потреблением."
+        )
+    else:
+        render_short_term_plan_table(result.queue_table)
+
+    if result.missing_stock_articles:
+        st.warning(
+            "Следующие артикулы были в завершённых WB FBS-поставках, "
+            "но не найдены в отчёте выбранного склада МоегоСклада: "
+            + ", ".join(result.missing_stock_articles)
+            + ". Это может означать нулевой остаток, отсутствие товара "
+            "на этом складе либо несовпадение артикулов."
+        )
+
+    with st.expander(
+        "Артикулы с достаточным остатком",
+        expanded=False,
+    ):
+        if result.normal_table.empty:
+            st.info(
+                "Нет артикулов, полностью покрытых "
+                "недельным уровнем потребления."
+            )
+        else:
+            render_short_term_plan_table(result.normal_table)
+
+    st.divider()
+    st.subheader("📥 Выгрузка")
+
+    try:
+        generated_at = saved["generated_at"]
+
+        export_bytes = make_short_term_plan_xlsx(
+            queue_table=result.queue_table,
+            full_table=result.full_table,
+            parameters={
+                "Период WB FBS-потребления": (
+                    f"{saved['period_start'].strftime('%d.%m.%Y')} — "
+                    f"{saved['period_end'].strftime('%d.%m.%Y')}"
+                ),
+                "Источник потребления": (
+                    "Завершённые WB FBS-поставки "
+                    "(done = true, closedAt в периоде)"
+                ),
+                "Префикс WB FBS-поставок": saved[
+                    "supply_name_prefix"
+                ],
+                "Целевой уровень запаса": (
+                    "Фактическое выбытие WB FBS за 7 дней"
+                ),
+                "Склад готовой продукции": saved["store_name"],
+                "UUID склада": saved["store_id"],
+                "Резервы МоегоСклада": (
+                    "Не учитываются на первом этапе"
+                ),
+                "Время формирования": generated_at.strftime(
+                    "%d.%m.%Y %H:%M"
+                ),
+                "Часовой пояс": "Europe/Moscow",
+            },
+        )
+
+        file_timestamp = generated_at.strftime(
+            "%Y%m%d_%H%M%S"
+        )
+
+        st.download_button(
+            label="📊 Скачать краткосрочный план XLSX",
+            data=export_bytes,
+            file_name=(
+                f"wb_fbs_short_term_plan_{file_timestamp}.xlsx"
+            ),
+            mime=(
+                "application/vnd.openxmlformats-officedocument"
+                ".spreadsheetml.sheet"
+            ),
+            use_container_width=True,
+        )
+
+    except ValueError as error:
+        st.error(str(error))
+
+    with st.expander(
+        "Как интерпретировать результаты",
+        expanded=False,
+    ):
+        st.markdown(
+            """
+            - **WB FBS, завершено за 7 дней** — количество сборочных
+              заданий, вошедших в WB-поставки с названием `Накл...`,
+              завершённые за последние семь полных дней.
+            - **Физический остаток** — поле `stock` выбранного склада
+              готовой продукции МоегоСклада.
+            - **Резервы** намеренно не участвуют в первом этапе:
+              FBO и FBS пока не разделены на независимые контуры.
+            - **Целевой остаток, 7 дней** — количество, фактически
+              выбывшее через завершённые WB FBS-поставки.
+            - **На триммер** — сколько единиц нужно провести
+              через триммер.
+            - **На упаковку** — сколько единиц нужно передать
+              на упаковку после триммера.
+            - **Критично** — остатка меньше чем на один день
+              среднего фактического WB FBS-потребления.
+            - **Срочно** — остатка от одного до двух дней.
+            """
+        )
+
+
+# ============================================================
+# БОКОВАЯ ПАНЕЛЬ
+# ============================================================
+
+def render_sidebar() -> None:
+    """Отображает глобальную боковую панель SPA."""
+    with st.sidebar:
+        st.markdown("## 📦 WB FBS")
+        st.caption("Стикеры и краткосрочное планирование")
+
+        st.divider()
+
+        st.markdown("**Разделы приложения**")
+        st.markdown(
+            """
+            - **Стикеры WB FBS** — выбор поставок, PDF и XLSX.
+            - **Краткосрочный план WB FBS** — остатки против
+              фактического недельного выбытия.
+            """
+        )
+
+        st.divider()
+
+        st.markdown("**Планирование: порядок работы**")
+        st.markdown(
+            """
+            1. Соберите утренние FBS-заказы.
+            2. Проведите отгрузку в МоемСкладе.
+            3. Откройте вкладку планирования.
+            4. Нажмите «Обновить потребности».
+            5. Передайте очередь триммеру и упаковке.
+            """
+        )
+
+        st.divider()
+
+        if st.button(
+            "⍈ Выйти",
+            use_container_width=True,
+            key="logout_button",
+        ):
+            logout()
 
 
 # ============================================================
@@ -1339,7 +1839,7 @@ def render_main_page(client: WBClient) -> None:
 # ============================================================
 
 def main() -> None:
-    """Запускает приложение."""
+    """Запускает SPA-приложение."""
     init_session_state()
 
     users = get_users()
@@ -1350,19 +1850,28 @@ def main() -> None:
 
     apply_main_styles()
 
-    try:
-        token = str(st.secrets["WB_API_TOKEN"]).strip()
-    except Exception:
+    wb_token = get_secret("WB_API_TOKEN")
+
+    if not wb_token:
         st.error("Добавьте `WB_API_TOKEN` в Streamlit Secrets.")
         st.stop()
 
-    if not token:
-        st.error("`WB_API_TOKEN` в Streamlit Secrets пуст.")
-        st.stop()
+    client = WBClient(token=wb_token)
 
-    client = WBClient(token=token)
+    render_sidebar()
 
-    render_main_page(client)
+    stickers_tab, planning_tab = st.tabs(
+        [
+            "📦 Стикеры WB FBS",
+            "⚡ Краткосрочный план WB FBS",
+        ]
+    )
+
+    with stickers_tab:
+        render_stickers_tab(client)
+
+    with planning_tab:
+        render_short_term_plan_tab(client)
 
 
 if __name__ == "__main__":
