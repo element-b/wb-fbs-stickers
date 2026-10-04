@@ -13,11 +13,7 @@ from short_term_plan import (
     ShortTermPlanResult,
     build_short_term_plan,
 )
-from wb_statistics_api import (
-    WBStatisticsApiError,
-    WBStatisticsClient,
-    seconds_until_orders_request,
-)
+from wb_api import WBApiError, WBClient
 
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
@@ -31,7 +27,7 @@ st.set_page_config(
 
 
 def get_secret(name: str) -> str:
-    """Безопасно читает строковый Streamlit Secret."""
+    """Безопасно читает строковое значение Streamlit Secret."""
     try:
         return str(st.secrets[name]).strip()
     except Exception:
@@ -106,7 +102,6 @@ def ensure_authenticated() -> None:
     """
     Не позволяет открыть производственную страницу без входа.
 
-    Пользователь должен сначала войти на главной странице приложения.
     Используется существующий флаг авторизации из `app.py`.
     """
     if st.session_state.get("authenticated", False):
@@ -149,7 +144,7 @@ def ensure_configuration(
 def render_plan_table(
     table: pd.DataFrame,
 ) -> None:
-    """Выводит таблицу производственной очереди."""
+    """Показывает таблицу краткосрочной производственной очереди."""
     st.dataframe(
         table,
         use_container_width=True,
@@ -163,15 +158,15 @@ def render_plan_table(
                 "Артикул",
                 width="large",
             ),
-            "WB FBS, заказов за 7 дней": (
+            "WB FBS, завершено за 7 дней": (
                 st.column_config.NumberColumn(
-                    "WB FBS, заказов за 7 дней",
+                    "WB FBS, завершено за 7 дней",
                     format="%d",
                 )
             ),
-            "Среднее WB FBS в день": (
+            "Среднее выбытие WB FBS в день": (
                 st.column_config.NumberColumn(
-                    "Среднее WB FBS в день",
+                    "Среднее выбытие WB FBS в день",
                     format="%.2f",
                 )
             ),
@@ -218,18 +213,18 @@ def render_plan_table(
 def render_shift_list(
     result: ShortTermPlanResult,
 ) -> None:
-    """Выводит короткий план, который можно передать Диме."""
+    """Выводит короткую очередь, которую можно передать Диме."""
     st.subheader("📋 Краткий план для производства")
 
     if result.queue_table.empty:
         st.success(
-            "Все артикулы с WB FBS-спросом покрыты "
-            "недельным физическим остатком."
+            "Все артикулы с WB FBS-потреблением покрыты "
+            "физическим остатком."
         )
         return
 
     st.caption(
-        "На первом этапе предполагается, что рулоны уже готовы. "
+        "В первой версии предполагается, что рулоны уже готовы. "
         "Поэтому количество для триммера и упаковки одинаково."
     )
 
@@ -258,8 +253,8 @@ def main() -> None:
             После утренней сборки WB FBS проведите отгрузку или списание
             в МоемСкладе. Затем нажмите «Обновить потребности».
             Приложение сравнит физический остаток готовой продукции
-            с недельным спросом WB FBS и сформирует очередь:
-            что направить на триммер и далее на упаковку.
+            с фактическим выбытием товаров через завершённые WB FBS-поставки
+            за последние семь завершённых дней.
         </div>
         """,
         unsafe_allow_html=True,
@@ -267,6 +262,7 @@ def main() -> None:
 
     wb_token = get_secret("WB_API_TOKEN")
     mysklad_token = get_secret("MYSKLAD_API_TOKEN")
+
     finished_store_id = get_secret(
         "MYSKLAD_WB_FBS_FINISHED_STORE_ID"
     )
@@ -279,32 +275,23 @@ def main() -> None:
 
     today = datetime.now(MOSCOW_TZ).date()
 
-    # Используются семь завершённых московских дней.
+    # Используются семь полностью завершённых календарных дней.
     period_end = today - timedelta(days=1)
     period_start = period_end - timedelta(days=6)
 
     st.caption(
-        "Период среднего WB FBS-спроса: "
+        "Период фактического WB FBS-потребления: "
         f"**{period_start.strftime('%d.%m.%Y')} — "
         f"{period_end.strftime('%d.%m.%Y')}**. "
-        "Текущий день не включён, так как он ещё не завершён."
+        "В расчёт входят только поставки WB с `done = true`, "
+        "закрытые в этот период."
     )
 
     st.caption(
-        "В расчёте используется только физический остаток `stock` "
-        "выбранного склада. Резервы МоегоСклада сейчас намеренно "
-        "не вычитаются."
+        "Используется только физический остаток `stock` выбранного "
+        "склада МоегоСклада. Резервы FBO и прочие резервы сейчас "
+        "намеренно не вычитаются."
     )
-
-    cooldown_seconds = seconds_until_orders_request()
-
-    if cooldown_seconds > 0:
-        st.info(
-            "WB Statistics API разрешает получать заказы "
-            "не чаще одного раза в минуту. "
-            f"Повторный запрос будет доступен примерно через "
-            f"{cooldown_seconds} сек."
-        )
 
     update_clicked = st.button(
         "⟳ Обновить потребности",
@@ -313,9 +300,7 @@ def main() -> None:
     )
 
     if update_clicked:
-        wb_client = WBStatisticsClient(
-            token=wb_token
-        )
+        wb_client = WBClient(token=wb_token)
 
         mysklad_client = MySkladClient(
             token=mysklad_token
@@ -323,8 +308,8 @@ def main() -> None:
 
         try:
             with st.spinner(
-                "Получаю физические остатки МоегоСклада "
-                "и недельный спрос WB FBS…"
+                "Получаю остатки МоегоСклада, завершённые "
+                "WB FBS-поставки и артикулы заданий…"
             ):
                 store_name = mysklad_client.store_name(
                     store_id=finished_store_id
@@ -336,13 +321,18 @@ def main() -> None:
                     )
                 )
 
-                wb_weekly_demand = wb_client.weekly_fbs_demand(
-                    date_from=period_start,
-                    date_to=period_end,
+                completed_fbs_by_article = (
+                    wb_client.completed_fbs_demand_by_article(
+                        date_from=period_start,
+                        date_to=period_end,
+                        order_lookback_days=31,
+                    )
                 )
 
                 result = build_short_term_plan(
-                    wb_weekly_demand=wb_weekly_demand,
+                    completed_fbs_by_article=(
+                        completed_fbs_by_article
+                    ),
                     physical_stock_by_article=(
                         physical_stock_by_article
                     ),
@@ -362,7 +352,7 @@ def main() -> None:
             )
 
         except (
-            WBStatisticsApiError,
+            WBApiError,
             MySkladApiError,
             ShortTermPlanError,
             ValueError,
@@ -388,8 +378,8 @@ def main() -> None:
     metric_1, metric_2, metric_3, metric_4, metric_5 = st.columns(5)
 
     metric_1.metric(
-        "WB FBS-заказов за 7 дней",
-        result.total_wb_orders,
+        "Завершено WB FBS за 7 дней",
+        result.total_completed_units,
     )
 
     metric_2.metric(
@@ -413,7 +403,7 @@ def main() -> None:
     )
 
     st.caption(
-        "Склад: "
+        "Склад готовой продукции: "
         f"`{saved['store_name']}`. "
         "Данные сформированы: "
         f"{saved['generated_at'].strftime('%d.%m.%Y %H:%M')} "
@@ -434,8 +424,8 @@ def main() -> None:
 
     elif result.replenish_count > 0:
         st.info(
-            "Критических дефицитов нет, но часть артикулов "
-            "нужно пополнить до недельного уровня."
+            "Критических дефицитов нет, но часть артикулов нужно "
+            "пополнить до недельного фактического потребления."
         )
 
     render_shift_list(result)
@@ -446,18 +436,18 @@ def main() -> None:
     if result.queue_table.empty:
         st.success(
             "Очередь пуста: все артикулы покрыты "
-            "недельным WB FBS-остатком."
+            "недельным WB FBS-потреблением."
         )
     else:
         render_plan_table(result.queue_table)
 
     if result.missing_stock_articles:
         st.warning(
-            "Следующие артикулы есть в WB FBS-спросе, но не найдены "
-            "в отчёте выбранного склада МоегоСклада: "
+            "Следующие артикулы были в завершённых WB FBS-поставках, "
+            "но не найдены в отчёте выбранного склада МоегоСклада: "
             + ", ".join(result.missing_stock_articles)
             + ". Это может означать нулевой остаток, отсутствие товара "
-            "на данном складе или несовпадение артикулов."
+            "на этом складе либо несовпадение артикулов."
         )
 
     with st.expander(
@@ -467,7 +457,7 @@ def main() -> None:
         if result.normal_table.empty:
             st.info(
                 "Нет артикулов, полностью покрытых "
-                "недельным уровнем спроса."
+                "недельным уровнем потребления."
             )
         else:
             render_plan_table(result.normal_table)
@@ -482,12 +472,16 @@ def main() -> None:
             queue_table=result.queue_table,
             full_table=result.full_table,
             parameters={
-                "Период WB FBS-спроса": (
+                "Период WB FBS-потребления": (
                     f"{saved['period_start'].strftime('%d.%m.%Y')} — "
                     f"{saved['period_end'].strftime('%d.%m.%Y')}"
                 ),
+                "Источник потребления": (
+                    "Завершённые WB FBS-поставки "
+                    "(done = true, closedAt в периоде)"
+                ),
                 "Целевой уровень запаса": (
-                    "Средняя потребность WB FBS за 7 дней"
+                    "Фактическое выбытие WB FBS за 7 дней"
                 ),
                 "Склад готовой продукции": saved["store_name"],
                 "UUID склада": saved["store_id"],
@@ -527,18 +521,22 @@ def main() -> None:
     ):
         st.markdown(
             """
-            - **Физический остаток** — значение `stock` только
-              выбранного склада готовой продукции МоегоСклада.
-            - **Резервы** намеренно не участвуют в первом этапе.
-            - **Целевой остаток, 7 дней** — число неотменённых
-              WB FBS-заказов за последние семь завершённых дней.
-            - **На триммер** — сколько единиц нужно запустить
+            - **WB FBS, завершено за 7 дней** — число сборочных заданий,
+              вошедших в WB-поставки, завершённые за последние семь
+              полностью завершённых дней.
+            - **Физический остаток** — поле `stock` выбранного склада
+              готовой продукции МоегоСклада.
+            - **Резервы** сейчас не участвуют в расчёте, поскольку
+              FBO и FBS пока не разделены на независимые контуры.
+            - **Целевой остаток, 7 дней** — количество, фактически
+              выбывшее через закрытые WB FBS-поставки.
+            - **На триммер** — количество, которое нужно обработать
               на триммере.
-            - **На упаковку** — сколько единиц нужно передать
+            - **На упаковку** — количество, которое нужно передать
               на упаковку после триммера.
-            - **Критично** — товара осталось меньше чем на один день
-              среднего WB FBS-спроса.
-            - **Срочно** — товара осталось от одного до двух дней.
+            - **Критично** — физического остатка менее чем на один
+              день среднего фактического WB FBS-потребления.
+            - **Срочно** — остатка от одного до двух дней.
             """
         )
 
