@@ -19,12 +19,20 @@ from wb_api import WBApiError, WBClient
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
 
+# ============================================================
+# НАСТРОЙКА СТРАНИЦЫ
+# ============================================================
+
 st.set_page_config(
     page_title="Краткосрочный план WB FBS",
     page_icon="⚡",
     layout="wide",
 )
 
+
+# ============================================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ============================================================
 
 def get_secret(name: str) -> str:
     """Безопасно читает строковое значение Streamlit Secret."""
@@ -100,9 +108,9 @@ def apply_styles() -> None:
 
 def ensure_authenticated() -> None:
     """
-    Не позволяет открыть производственную страницу без входа.
+    Не позволяет использовать страницу планирования без авторизации.
 
-    Используется существующий флаг авторизации из `app.py`.
+    Используется существующий флаг сессии из `app.py`.
     """
     if st.session_state.get("authenticated", False):
         return
@@ -118,8 +126,9 @@ def ensure_configuration(
     wb_token: str,
     mysklad_token: str,
     store_id: str,
+    supply_name_prefix: str,
 ) -> None:
-    """Проверяет обязательные Streamlit Secrets."""
+    """Проверяет обязательные параметры Streamlit Secrets."""
     missing = []
 
     if not wb_token:
@@ -133,6 +142,9 @@ def ensure_configuration(
             "`MYSKLAD_WB_FBS_FINISHED_STORE_ID`"
         )
 
+    if not supply_name_prefix.strip():
+        missing.append("`WB_FBS_SUPPLY_NAME_PREFIX`")
+
     if missing:
         st.error(
             "Не настроены обязательные Streamlit Secrets: "
@@ -140,6 +152,10 @@ def ensure_configuration(
         )
         st.stop()
 
+
+# ============================================================
+# ОТОБРАЖЕНИЕ ДАННЫХ
+# ============================================================
 
 def render_plan_table(
     table: pd.DataFrame,
@@ -213,7 +229,7 @@ def render_plan_table(
 def render_shift_list(
     result: ShortTermPlanResult,
 ) -> None:
-    """Выводит короткую очередь, которую можно передать Диме."""
+    """Показывает короткий список действий для производства."""
     st.subheader("📋 Краткий план для производства")
 
     if result.queue_table.empty:
@@ -240,8 +256,12 @@ def render_shift_list(
         )
 
 
+# ============================================================
+# ОСНОВНОЙ ЭКРАН
+# ============================================================
+
 def main() -> None:
-    """Точка входа страницы краткосрочного WB FBS-планирования."""
+    """Точка входа страницы краткосрочного планирования WB FBS."""
     ensure_authenticated()
     apply_styles()
 
@@ -267,15 +287,24 @@ def main() -> None:
         "MYSKLAD_WB_FBS_FINISHED_STORE_ID"
     )
 
+    # Если Secret не указан, используется безопасное значение
+    # по умолчанию для вашего направления «Наклей меня».
+    supply_name_prefix = (
+        get_secret("WB_FBS_SUPPLY_NAME_PREFIX")
+        or "Накл"
+    )
+
     ensure_configuration(
         wb_token=wb_token,
         mysklad_token=mysklad_token,
         store_id=finished_store_id,
+        supply_name_prefix=supply_name_prefix,
     )
 
     today = datetime.now(MOSCOW_TZ).date()
 
-    # Используются семь полностью завершённых календарных дней.
+    # Берутся семь полностью завершённых календарных дней.
+    # Текущий день не учитывается, так как он ещё не завершён.
     period_end = today - timedelta(days=1)
     period_start = period_end - timedelta(days=6)
 
@@ -283,14 +312,15 @@ def main() -> None:
         "Период фактического WB FBS-потребления: "
         f"**{period_start.strftime('%d.%m.%Y')} — "
         f"{period_end.strftime('%d.%m.%Y')}**. "
-        "В расчёт входят только поставки WB с `done = true`, "
-        "закрытые в этот период."
+        "В расчёт входят только завершённые WB-поставки "
+        "с `done = true`, закрытые в этот период, и с названием, "
+        f"начинающимся с `{supply_name_prefix}`."
     )
 
     st.caption(
         "Используется только физический остаток `stock` выбранного "
-        "склада МоегоСклада. Резервы FBO и прочие резервы сейчас "
-        "намеренно не вычитаются."
+        "склада МоегоСклада. Резервы FBO и другие резервы намеренно "
+        "не вычитаются на первом этапе."
     )
 
     update_clicked = st.button(
@@ -309,7 +339,7 @@ def main() -> None:
         try:
             with st.spinner(
                 "Получаю остатки МоегоСклада, завершённые "
-                "WB FBS-поставки и артикулы заданий…"
+                "WB FBS-поставки и артикулы сборочных заданий…"
             ):
                 store_name = mysklad_client.store_name(
                     store_id=finished_store_id
@@ -325,6 +355,7 @@ def main() -> None:
                     wb_client.completed_fbs_demand_by_article(
                         date_from=period_start,
                         date_to=period_end,
+                        supply_name_prefix=supply_name_prefix,
                         order_lookback_days=31,
                     )
                 )
@@ -344,6 +375,7 @@ def main() -> None:
                 "period_end": period_end,
                 "store_name": store_name,
                 "store_id": finished_store_id,
+                "supply_name_prefix": supply_name_prefix,
                 "generated_at": datetime.now(MOSCOW_TZ),
             }
 
@@ -405,6 +437,8 @@ def main() -> None:
     st.caption(
         "Склад готовой продукции: "
         f"`{saved['store_name']}`. "
+        "Префикс WB-поставок: "
+        f"`{saved['supply_name_prefix']}`. "
         "Данные сформированы: "
         f"{saved['generated_at'].strftime('%d.%m.%Y %H:%M')} "
         "по Москве."
@@ -480,6 +514,9 @@ def main() -> None:
                     "Завершённые WB FBS-поставки "
                     "(done = true, closedAt в периоде)"
                 ),
+                "Префикс WB FBS-поставок": saved[
+                    "supply_name_prefix"
+                ],
                 "Целевой уровень запаса": (
                     "Фактическое выбытие WB FBS за 7 дней"
                 ),
@@ -521,21 +558,21 @@ def main() -> None:
     ):
         st.markdown(
             """
-            - **WB FBS, завершено за 7 дней** — число сборочных заданий,
-              вошедших в WB-поставки, завершённые за последние семь
-              полностью завершённых дней.
+            - **WB FBS, завершено за 7 дней** — количество сборочных
+              заданий, вошедших в WB-поставки с названием `Накл...`,
+              завершённые за последние семь полных дней.
             - **Физический остаток** — поле `stock` выбранного склада
               готовой продукции МоегоСклада.
-            - **Резервы** сейчас не участвуют в расчёте, поскольку
+            - **Резервы** намеренно не участвуют в первом этапе:
               FBO и FBS пока не разделены на независимые контуры.
             - **Целевой остаток, 7 дней** — количество, фактически
-              выбывшее через закрытые WB FBS-поставки.
-            - **На триммер** — количество, которое нужно обработать
-              на триммере.
-            - **На упаковку** — количество, которое нужно передать
+              выбывшее через завершённые WB FBS-поставки.
+            - **На триммер** — сколько единиц нужно провести
+              через триммер.
+            - **На упаковку** — сколько единиц нужно передать
               на упаковку после триммера.
-            - **Критично** — физического остатка менее чем на один
-              день среднего фактического WB FBS-потребления.
+            - **Критично** — остатка меньше чем на один день
+              среднего фактического WB FBS-потребления.
             - **Срочно** — остатка от одного до двух дней.
             """
         )
