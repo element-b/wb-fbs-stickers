@@ -12,16 +12,14 @@ BASE_URL = "https://api-seller.ozon.ru"
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
-# В общей документации Ozon указан лимит до 50 запросов в секунду
-# для одного Client-Id. Здесь намеренно используется более консервативный
-# последовательный режим: максимум около 4 запросов в секунду.
+# Консервативный последовательный режим для ручного ежедневного запуска.
 MIN_REQUEST_INTERVAL_SECONDS = 0.25
 
-# Максимальный размер страницы метода /v4/posting/fbs/list.
-MAX_PAGE_SIZE = 1000
+# Для первого стабильного внедрения используем небольшой и безопасный размер
+# страницы. Пагинация реализована через cursor и has_next.
+PAGE_SIZE = 100
 
-# Статусы, согласованные для контура производства:
-# товар уже передан в доставку / покинул склад продавца.
+# Согласованные статусы: товар уже передан в доставку / покинул склад.
 COMPLETED_FBS_STATUSES = (
     "delivering",
     "sent_by_seller",
@@ -55,8 +53,8 @@ def _parse_ozon_datetime(
     """
     Преобразует ISO-даты Ozon в Europe/Moscow.
 
-    Значения без timezone намеренно не трактуются как UTC или Москва:
-    это могло бы ошибочно включить или исключить отправление на границе дня.
+    Значение без timezone намеренно не интерпретируется:
+    это может ошибочно включить posting на границе московского дня.
     """
     if not isinstance(value, str) or not value.strip():
         return None
@@ -77,7 +75,7 @@ def _parse_ozon_datetime(
 def _to_utc_iso(
     value: datetime,
 ) -> str:
-    """Возвращает RFC 3339 UTC-время для тела запроса Ozon."""
+    """Преобразует datetime в RFC 3339 UTC для Ozon Seller API."""
     return (
         value.astimezone(timezone.utc)
         .replace(microsecond=0)
@@ -91,9 +89,9 @@ def _period_boundaries(
     date_to: date,
 ) -> tuple[datetime, datetime]:
     """
-    Формирует границы московского календарного периода.
+    Возвращает границы московского периода.
 
-    Левая граница включается, правая исключается.
+    Левая граница включительна, правая исключительна.
     """
     period_start = datetime.combine(
         date_from,
@@ -110,16 +108,59 @@ def _period_boundaries(
     return period_start, period_end_exclusive
 
 
+def _safe_ozon_error_hint(
+    response: requests.Response,
+) -> str:
+    """
+    Возвращает короткое безопасное пояснение Ozon к HTTP-ошибке.
+
+    Не выводятся:
+    - API-ключ;
+    - Client-Id;
+    - заголовки;
+    - полный ответ;
+    - потенциально персональные данные из posting.
+
+    Используются только короткие стандартные поля ошибки API.
+    """
+    try:
+        payload = response.json()
+    except ValueError:
+        return ""
+
+    if not isinstance(payload, dict):
+        return ""
+
+    candidates = [
+        payload.get("message"),
+        payload.get("error"),
+        payload.get("details"),
+        payload.get("description"),
+    ]
+
+    for value in candidates:
+        if not isinstance(value, str):
+            continue
+
+        text = " ".join(value.split())
+
+        if text:
+            # Ограничение длины исключает вывод большого тела ответа.
+            return text[:300]
+
+    return ""
+
+
 class OzonClient:
     """
     Read-only клиент Ozon Seller API.
 
-    Используется только:
+    Используемый endpoint:
 
     POST /v4/posting/fbs/list
 
-    Клиент не создаёт, не изменяет, не отменяет posting, поставки,
-    остатки, задания или документы.
+    Никакие документы, posting, остатки, задания или поставки не создаются,
+    не изменяются и не отменяются.
     """
 
     def __init__(
@@ -153,7 +194,7 @@ class OzonClient:
         )
 
     def _wait_for_rate_limit(self) -> None:
-        """Выдерживает консервативный интервал между запросами."""
+        """Соблюдает консервативный интервал между запросами."""
         elapsed = time.monotonic() - self._last_request_at
         delay = MIN_REQUEST_INTERVAL_SECONDS - elapsed
 
@@ -165,7 +206,7 @@ class OzonClient:
         response: requests.Response,
         attempt: int,
     ) -> float:
-        """Определяет безопасную задержку перед повтором."""
+        """Возвращает задержку перед безопасной повторной попыткой."""
         retry_after = response.headers.get("Retry-After")
 
         if retry_after:
@@ -188,7 +229,6 @@ class OzonClient:
         Выполняет POST-запрос с ограниченными повторами.
 
         Повторяются только сетевые ошибки, HTTP 429 и HTTP 5xx.
-        Тело ответа, API-ключ и заголовки авторизации не выводятся.
         """
         url = f"{BASE_URL}{path}"
 
@@ -223,8 +263,8 @@ class OzonClient:
 
             if response.status_code == 403:
                 raise OzonApiError(
-                    "Ozon отказал в доступе. Проверьте, что API-ключ "
-                    "имеет право чтения FBS-отправлений.",
+                    "Ozon отказал в доступе. Проверьте права "
+                    "API-ключа на чтение FBS-отправлений.",
                     status=403,
                 )
 
@@ -261,9 +301,18 @@ class OzonClient:
                 continue
 
             if not response.ok:
-                raise OzonApiError(
+                hint = _safe_ozon_error_hint(response)
+
+                message = (
                     "Ozon Seller API вернул ошибку "
-                    f"HTTP {response.status_code}.",
+                    f"HTTP {response.status_code}."
+                )
+
+                if hint:
+                    message += f" Пояснение Ozon: {hint}"
+
+                raise OzonApiError(
+                    message,
                     status=response.status_code,
                 )
 
@@ -291,12 +340,7 @@ class OzonClient:
         posting_number: str,
         offer_id: str,
     ) -> int:
-        """
-        Проверяет количество товара.
-
-        Нельзя молча округлять, уменьшать или пропускать количество:
-        это сформирует потенциально неполный производственный план.
-        """
+        """Проверяет, что quantity — положительное целое число."""
         if isinstance(value, bool):
             raise OzonApiError(
                 "Ozon вернул некорректное количество товара "
@@ -332,11 +376,7 @@ class OzonClient:
     def _posting_is_test(
         posting: dict,
     ) -> bool:
-        """
-        Исключает тестовые posting, если Ozon вернул технический флаг.
-
-        Если поля нет, posting не считается тестовым автоматически.
-        """
+        """Исключает тестовые posting, если API вернул технический флаг."""
         return bool(
             posting.get("is_test")
             or posting.get("is_test_order")
@@ -346,7 +386,7 @@ class OzonClient:
     def _posting_cancelled_after_ship(
         posting: dict,
     ) -> bool:
-        """Исключает отменённые после отгрузки posting."""
+        """Исключает отправления, отменённые после отгрузки."""
         cancellation = posting.get("cancellation")
 
         if not isinstance(cancellation, dict):
@@ -359,13 +399,12 @@ class OzonClient:
     @staticmethod
     def _posting_fingerprint(
         posting: dict,
-    ) -> tuple[str, str, str]:
+    ) -> tuple[str, str, tuple[tuple[str, str], ...]]:
         """
-        Формирует минимальный отпечаток posting для контроля дублей.
+        Возвращает безопасный отпечаток posting для проверки дублей.
 
-        Один `posting_number` может повториться из-за пагинации или
-        пересечения данных. Если одинаковый номер вернулся с разными
-        статусом, датой передачи или составом — расчёт останавливается.
+        Если один posting_number вернулся дважды с различными данными,
+        расчёт останавливается, а не выбирает версию произвольно.
         """
         status = str(posting.get("status") or "").strip()
 
@@ -376,30 +415,32 @@ class OzonClient:
         products = posting.get("products")
 
         if not isinstance(products, list):
-            products_marker = "<invalid-products>"
-        else:
-            normalized_products = []
+            return (
+                status,
+                delivering_date,
+                (("<invalid-products>", ""),),
+            )
 
-            for product in products:
-                if not isinstance(product, dict):
-                    normalized_products.append("<invalid-product>")
-                    continue
+        normalized_products: list[tuple[str, str]] = []
 
+        for product in products:
+            if not isinstance(product, dict):
                 normalized_products.append(
-                    (
-                        str(product.get("offer_id") or "").strip(),
-                        str(product.get("quantity") or "").strip(),
-                    )
+                    ("<invalid-product>", "")
                 )
+                continue
 
-            products_marker = repr(
-                tuple(sorted(normalized_products))
+            normalized_products.append(
+                (
+                    str(product.get("offer_id") or "").strip(),
+                    str(product.get("quantity") or "").strip(),
+                )
             )
 
         return (
             status,
             delivering_date,
-            products_marker,
+            tuple(sorted(normalized_products)),
         )
 
     def _list_postings_page(
@@ -409,13 +450,20 @@ class OzonClient:
         to: datetime,
     ) -> tuple[list[dict], bool, str]:
         """
-        Получает одну страницу `/v4/posting/fbs/list`.
+        Получает одну страницу FBS-posting.
 
-        В v4:
-        - статусы передаются как `filter.statuses`;
-        - курсор передаётся верхним полем `cursor`;
-        - posting находятся в корне ответа;
-        - пагинация — `has_next` + `cursor`.
+        Для стабильности используется минимальное тело v4:
+
+        - `cursor`;
+        - `filter.since`;
+        - `filter.to`;
+        - `filter.statuses`;
+        - `limit`;
+        - `sort_dir`.
+
+        Необязательные поля `with`, `translit` и другие поля намеренно
+        не отправляются: они не нужны для расчёта и не должны быть причиной
+        ошибки валидации запроса.
         """
         payload = {
             "cursor": cursor,
@@ -424,15 +472,8 @@ class OzonClient:
                 "to": _to_utc_iso(to),
                 "statuses": list(COMPLETED_FBS_STATUSES),
             },
-            "limit": MAX_PAGE_SIZE,
+            "limit": PAGE_SIZE,
             "sort_dir": "asc",
-            "translit": False,
-            "with": {
-                "analytics_data": False,
-                "barcodes": False,
-                "financial_data": False,
-                "legal_info": False,
-            },
         }
 
         response = self._request(
@@ -461,7 +502,7 @@ class OzonClient:
 
         if not isinstance(next_cursor, str):
             raise OzonApiError(
-                "Ozon вернул некорректный курсор пагинации."
+                "Ozon вернул некорректный cursor пагинации."
             )
 
         return (
@@ -479,7 +520,7 @@ class OzonClient:
         since: datetime,
         to: datetime,
     ) -> list[dict]:
-        """Получает все страницы FBS-posting методом cursor-пагинации."""
+        """Получает все страницы Ozon FBS-posting через cursor-пагинацию."""
         all_postings: list[dict] = []
 
         cursor = ""
@@ -501,15 +542,15 @@ class OzonClient:
 
             if not next_cursor:
                 raise OzonApiError(
-                    "Ozon сообщил о следующей странице FBS-отправлений, "
-                    "но не вернул курсор. План не обновлён, чтобы "
-                    "исключить неполный расчёт."
+                    "Ozon сообщил о следующей странице, но не вернул "
+                    "cursor. План не обновлён, чтобы исключить "
+                    "неполный расчёт."
                 )
 
             if next_cursor in seen_cursors:
                 raise OzonApiError(
-                    "Ozon вернул повторяющийся курсор FBS-отправлений. "
-                    "План не обновлён, чтобы исключить неполный расчёт."
+                    "Ozon вернул повторяющийся cursor. План не обновлён, "
+                    "чтобы исключить неполный расчёт."
                 )
 
             seen_cursors.add(next_cursor)
@@ -520,34 +561,28 @@ class OzonClient:
         date_from: date,
         date_to: date,
         offer_id_prefix: str = "NAKL_",
-        query_lookback_days: int = 31,
     ) -> OzonFbsDemandResult:
         """
         Возвращает фактическое Ozon FBS-потребление по offer_id.
 
-        Условия включения:
+        Включаются только posting:
 
         - status: `delivering` или `sent_by_seller`;
-        - дата фактической передачи: `delivering_date`;
-        - delivering_date попадает в переданный московский период;
-        - posting не тестовый и не отменён после отгрузки;
-        - offer_id начинается с точного регистрозависимого префикса NAKL_.
+        - `delivering_date` в нужном московском периоде;
+        - не тестовые;
+        - не отменённые после отгрузки;
+        - с offer_id, начинающимся с точного регистрозависимого NAKL_.
 
-        `filter.since` и `filter.to` используются для получения списка
-        posting. Поскольку posting мог быть создан до дня фактической
-        передачи в доставку, запрос расширяется назад на 31 день.
+        Период запроса равен периоду производственного анализа: 7 полностью
+        завершённых московских дней. Для текущего процесса это достаточно,
+        так как максимальная допустимая задержка FBS составляет 1–2 дня.
 
-        Финальная проверка периода всегда идёт по `delivering_date`.
+        Финальная бизнес-проверка всё равно выполняется по delivering_date,
+        а не по дате создания posting.
         """
         if date_from > date_to:
             raise ValueError(
                 "Дата начала периода Ozon не может быть позже даты конца."
-            )
-
-        if query_lookback_days < 1:
-            raise ValueError(
-                "Период поиска Ozon FBS-posting должен быть "
-                "не меньше одного дня."
             )
 
         prefix = offer_id_prefix.strip()
@@ -562,17 +597,16 @@ class OzonClient:
             date_to=date_to,
         )
 
-        query_start = target_start - timedelta(
-            days=query_lookback_days
-        )
-
         postings = self._list_postings(
-            since=query_start,
+            since=target_start,
             to=target_end_exclusive,
         )
 
         unique_postings: dict[str, dict] = {}
-        posting_fingerprints: dict[str, tuple[str, str, str]] = {}
+        fingerprints: dict[
+            str,
+            tuple[str, str, tuple[tuple[str, str], ...]],
+        ] = {}
 
         for posting in postings:
             posting_number = str(
@@ -587,11 +621,10 @@ class OzonClient:
 
             fingerprint = self._posting_fingerprint(posting)
 
-            if posting_number in unique_postings:
-                if (
-                    posting_fingerprints[posting_number]
-                    != fingerprint
-                ):
+            previous_fingerprint = fingerprints.get(posting_number)
+
+            if previous_fingerprint is not None:
+                if previous_fingerprint != fingerprint:
                     raise OzonApiError(
                         "Ozon вернул один `posting_number` с разными "
                         "данными. План не обновлён, чтобы исключить "
@@ -601,7 +634,7 @@ class OzonClient:
                 continue
 
             unique_postings[posting_number] = posting
-            posting_fingerprints[posting_number] = fingerprint
+            fingerprints[posting_number] = fingerprint
 
         demand_by_offer_id: dict[str, int] = {}
         skipped_non_matching_offer_ids: set[str] = set()
@@ -660,8 +693,6 @@ class OzonClient:
                     product.get("offer_id") or ""
                 ).strip()
 
-                # Пустой offer_id нельзя тихо исключить: невозможно
-                # определить, относится ли товар к NAKL_.
                 if not offer_id:
                     raise OzonApiError(
                         "Ozon вернул товар без `offer_id` "
@@ -676,9 +707,8 @@ class OzonClient:
                     offer_id=offer_id,
                 )
 
-                # Только внешние пробелы уже удалены через strip().
-                # Регистр, внутренние пробелы и остальные символы
-                # не изменяются.
+                # Точное регистрозависимое сравнение.
+                # Изменены только внешние пробелы через strip().
                 if not offer_id.startswith(prefix):
                     skipped_non_matching_offer_ids.add(offer_id)
                     continue

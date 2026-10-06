@@ -1631,7 +1631,6 @@ def render_short_term_plan_tab(
                         date_from=period_start,
                         date_to=period_end,
                         offer_id_prefix=ozon_offer_id_prefix,
-                        query_lookback_days=31,
                     )
                 )
 
