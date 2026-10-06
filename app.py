@@ -10,6 +10,12 @@ import streamlit as st
 
 from mysklad_api import MySkladApiError, MySkladClient
 from mysklad_export import make_mysklad_xlsx
+from ozon_api import (
+    COMPLETED_FBS_STATUSES,
+    OzonApiError,
+    OzonClient,
+    OzonFbsDemandResult,
+)
 from pdf_export import make_pdf
 from pdf_tab import render_open_pdf_button
 from pipeline import DataCheckError, collect_and_group
@@ -40,7 +46,7 @@ PRINT_ORDER_OPTIONS = {
 # ============================================================
 
 st.set_page_config(
-    page_title="WB FBS",
+    page_title="FBS",
     page_icon="📦",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -1336,19 +1342,21 @@ def render_stickers_tab(client: WBClient) -> None:
 
 
 # ============================================================
-# ВКЛАДКА: КРАТКОСРОЧНОЕ ПЛАНИРОВАНИЕ WB FBS
+# ВКЛАДКА: КРАТКОСРОЧНЫЙ ПЛАН WB + OZON FBS
 # ============================================================
 
 def ensure_short_term_configuration(
     mysklad_token: str,
     store_id: str,
+    ozon_client_id: str,
+    ozon_api_key: str,
 ) -> bool:
     """
     Проверяет Secrets, необходимые только для вкладки планирования.
 
     Возвращает False, а не останавливает всё приложение, чтобы вкладка
     печати стикеров оставалась доступной даже при неполной настройке
-    МоегоСклада.
+    МоегоСклада или Ozon.
     """
     missing = []
 
@@ -1359,6 +1367,12 @@ def ensure_short_term_configuration(
         missing.append(
             "`MYSKLAD_WB_FBS_FINISHED_STORE_ID`"
         )
+
+    if not ozon_client_id:
+        missing.append("`OZON_CLIENT_ID`")
+
+    if not ozon_api_key:
+        missing.append("`OZON_API_KEY`")
 
     if missing:
         st.error(
@@ -1394,9 +1408,21 @@ def render_short_term_plan_table(
                     format="%d",
                 )
             ),
-            "Среднее выбытие WB FBS в день": (
+            "Ozon FBS, завершено за 7 дней": (
                 st.column_config.NumberColumn(
-                    "Среднее выбытие WB FBS в день",
+                    "Ozon FBS, завершено за 7 дней",
+                    format="%d",
+                )
+            ),
+            "Всего FBS, завершено за 7 дней": (
+                st.column_config.NumberColumn(
+                    "Всего FBS, завершено за 7 дней",
+                    format="%d",
+                )
+            ),
+            "Среднее выбытие FBS в день": (
+                st.column_config.NumberColumn(
+                    "Среднее выбытие FBS в день",
                     format="%.2f",
                 )
             ),
@@ -1448,7 +1474,7 @@ def render_short_term_shift_list(
 
     if result.queue_table.empty:
         st.success(
-            "Все артикулы с WB FBS-потреблением покрыты "
+            "Все артикулы с FBS-потреблением покрыты "
             "физическим остатком."
         )
         return
@@ -1470,28 +1496,32 @@ def render_short_term_shift_list(
         )
 
 
-def render_short_term_plan_tab(client: WBClient) -> None:
+def render_short_term_plan_tab(
+    wb_client: WBClient,
+) -> None:
     """
-    Отображает вкладку краткосрочного пополнения WB FBS-остатков.
+    Отображает общую краткосрочную очередь WB FBS + Ozon FBS.
 
-    Источник потребления:
-    завершённые WB FBS-поставки с именем, начинающимся на «Накл».
+    WB:
+    завершённые поставки WB с префиксом «Накл».
 
-    Источник остатков:
-    физический остаток `stock` выбранного склада МоегоСклада.
+    Ozon:
+    FBS-posting в статусах delivering и sent_by_seller,
+    отобранные по delivering_date.
 
-    Резерв `reserve` намеренно не учитывается.
+    Остатки:
+    только физический stock выбранного склада МоегоСклада.
     """
-    st.title("⚡ Краткосрочный план WB FBS")
+    st.title("⚡ Краткосрочный план FBS")
 
     st.markdown(
         """
         <div class="description-box">
-            После утренней сборки WB FBS проведите отгрузку или списание
-            в МоемСкладе. Затем нажмите «Обновить потребности».
-            Приложение сравнит физический остаток готовой продукции
-            с фактическим выбытием товаров через завершённые WB FBS-поставки
-            за последние семь завершённых дней.
+            После утренней сборки FBS-заказов WB и Ozon проведите
+            отгрузку или списание в МоемСкладе. Затем нажмите
+            «Обновить потребности». Приложение сравнит физический остаток
+            готовой продукции с фактическим FBS-выбытием за последние
+            семь полностью завершённых московских дней.
         </div>
         """,
         unsafe_allow_html=True,
@@ -1503,37 +1533,55 @@ def render_short_term_plan_tab(client: WBClient) -> None:
         "MYSKLAD_WB_FBS_FINISHED_STORE_ID"
     )
 
+    ozon_client_id = get_secret("OZON_CLIENT_ID")
+    ozon_api_key = get_secret("OZON_API_KEY")
+
     supply_name_prefix = (
         get_secret("WB_FBS_SUPPLY_NAME_PREFIX")
         or "Накл"
     )
 
+    ozon_offer_id_prefix = (
+        get_secret("OZON_FBS_OFFER_ID_PREFIX")
+        or "NAKL_"
+    )
+
     if not ensure_short_term_configuration(
         mysklad_token=mysklad_token,
         store_id=finished_store_id,
+        ozon_client_id=ozon_client_id,
+        ozon_api_key=ozon_api_key,
     ):
         return
 
     today = datetime.now(MOSCOW_TZ).date()
 
-    # Семь полностью завершённых календарных дней.
+    # Семь полностью завершённых московских календарных дней.
     # Текущий день намеренно не учитывается.
     period_end = today - timedelta(days=1)
     period_start = period_end - timedelta(days=6)
 
     st.caption(
-        "Период фактического WB FBS-потребления: "
+        "Период анализа: "
         f"**{period_start.strftime('%d.%m.%Y')} — "
-        f"{period_end.strftime('%d.%m.%Y')}**. "
-        "В расчёт входят только поставки WB с `done = true`, "
-        "закрытые в этот период, и с названием, начинающимся с "
-        f"`{supply_name_prefix}`."
+        f"{period_end.strftime('%d.%m.%Y')}** "
+        "по часовому поясу Europe/Moscow."
+    )
+
+    st.caption(
+        "WB: завершённые поставки с `done = true`, `closedAt` в периоде "
+        f"и префиксом `{supply_name_prefix}`. "
+        "Ozon: FBS-posting со статусами "
+        f"`{', '.join(COMPLETED_FBS_STATUSES)}`, "
+        "отобранные по фактической дате `delivering_date`, "
+        "и только товары с offer_id, начинающимся с точного "
+        f"префикса `{ozon_offer_id_prefix}`."
     )
 
     st.caption(
         "Используется только физический остаток `stock` выбранного "
-        "склада МоегоСклада. Резервы FBO и другие резервы намеренно "
-        "не вычитаются на первом этапе."
+        "склада МоегоСклада. Резервы, FBO-резервы, `quantity` "
+        "и `inTransit` на этом этапе не учитываются."
     )
 
     update_clicked = st.button(
@@ -1548,10 +1596,16 @@ def render_short_term_plan_tab(client: WBClient) -> None:
             token=mysklad_token
         )
 
+        ozon_client = OzonClient(
+            client_id=ozon_client_id,
+            api_key=ozon_api_key,
+        )
+
         try:
             with st.spinner(
                 "Получаю остатки МоегоСклада, завершённые "
-                "WB FBS-поставки и артикулы сборочных заданий…"
+                "WB FBS-поставки и переданные в доставку "
+                "Ozon FBS-отправления…"
             ):
                 store_name = mysklad_client.store_name(
                     store_id=finished_store_id
@@ -1563,8 +1617,8 @@ def render_short_term_plan_tab(client: WBClient) -> None:
                     )
                 )
 
-                completed_fbs_by_article = (
-                    client.completed_fbs_demand_by_article(
+                completed_wb_fbs_by_article = (
+                    wb_client.completed_fbs_demand_by_article(
                         date_from=period_start,
                         date_to=period_end,
                         supply_name_prefix=supply_name_prefix,
@@ -1572,9 +1626,21 @@ def render_short_term_plan_tab(client: WBClient) -> None:
                     )
                 )
 
+                ozon_demand: OzonFbsDemandResult = (
+                    ozon_client.completed_fbs_demand_by_offer_id(
+                        date_from=period_start,
+                        date_to=period_end,
+                        offer_id_prefix=ozon_offer_id_prefix,
+                        query_lookback_days=31,
+                    )
+                )
+
                 result = build_short_term_plan(
-                    completed_fbs_by_article=(
-                        completed_fbs_by_article
+                    completed_wb_fbs_by_article=(
+                        completed_wb_fbs_by_article
+                    ),
+                    completed_ozon_fbs_by_article=(
+                        ozon_demand.demand_by_offer_id
                     ),
                     physical_stock_by_article=(
                         physical_stock_by_article
@@ -1588,15 +1654,23 @@ def render_short_term_plan_tab(client: WBClient) -> None:
                 "store_name": store_name,
                 "store_id": finished_store_id,
                 "supply_name_prefix": supply_name_prefix,
+                "ozon_offer_id_prefix": ozon_offer_id_prefix,
+                "ozon_included_posting_count": (
+                    ozon_demand.included_posting_count
+                ),
+                "ozon_skipped_non_matching_offer_ids": (
+                    ozon_demand.skipped_non_matching_offer_ids
+                ),
                 "generated_at": datetime.now(MOSCOW_TZ),
             }
 
             st.success(
-                "Потребности WB FBS успешно обновлены."
+                "Потребности WB FBS и Ozon FBS успешно обновлены."
             )
 
         except (
             WBApiError,
+            OzonApiError,
             MySkladApiError,
             ShortTermPlanError,
             ValueError,
@@ -1619,41 +1693,51 @@ def render_short_term_plan_tab(client: WBClient) -> None:
     st.divider()
     st.subheader("📊 Сводка")
 
-    metric_1, metric_2, metric_3, metric_4, metric_5 = st.columns(5)
+    metric_1, metric_2, metric_3 = st.columns(3)
 
     metric_1.metric(
-        "Завершено WB FBS за 7 дней",
-        result.total_completed_units,
+        "WB FBS завершено за 7 дней",
+        result.total_wb_completed_units,
     )
 
     metric_2.metric(
+        "Ozon FBS завершено за 7 дней",
+        result.total_ozon_completed_units,
+    )
+
+    metric_3.metric(
+        "Всего FBS завершено за 7 дней",
+        result.total_completed_units,
+    )
+
+    metric_4, metric_5, metric_6 = st.columns(3)
+
+    metric_4.metric(
         "Нужно на триммер",
         result.total_need_to_finish,
     )
 
-    metric_3.metric(
+    metric_5.metric(
         "Критично: менее 1 дня",
         result.critical_count,
     )
 
-    metric_4.metric(
+    metric_6.metric(
         "Срочно: 1–2 дня",
         result.urgent_count,
-    )
-
-    metric_5.metric(
-        "Пополнить: 2–7 дней",
-        result.replenish_count,
     )
 
     st.caption(
         "Склад готовой продукции: "
         f"`{saved['store_name']}`. "
-        "Префикс WB-поставок: "
-        f"`{saved['supply_name_prefix']}`. "
         "Данные сформированы: "
         f"{saved['generated_at'].strftime('%d.%m.%Y %H:%M')} "
         "по Москве."
+    )
+
+    st.caption(
+        "Ozon FBS-posting, вошедшие в расчёт: "
+        f"**{saved['ozon_included_posting_count']}**."
     )
 
     if result.critical_count > 0:
@@ -1671,7 +1755,7 @@ def render_short_term_plan_tab(client: WBClient) -> None:
     elif result.replenish_count > 0:
         st.info(
             "Критических дефицитов нет, но часть артикулов нужно "
-            "пополнить до недельного фактического потребления."
+            "пополнить до недельного фактического FBS-потребления."
         )
 
     render_short_term_shift_list(result)
@@ -1682,18 +1766,31 @@ def render_short_term_plan_tab(client: WBClient) -> None:
     if result.queue_table.empty:
         st.success(
             "Очередь пуста: все артикулы покрыты "
-            "недельным WB FBS-потреблением."
+            "недельным FBS-потреблением."
         )
     else:
         render_short_term_plan_table(result.queue_table)
 
     if result.missing_stock_articles:
         st.warning(
-            "Следующие артикулы были в завершённых WB FBS-поставках, "
-            "но не найдены в отчёте выбранного склада МоегоСклада: "
+            "Следующие артикулы были в фактическом WB FBS- или "
+            "Ozon FBS-потреблении, но не найдены в отчёте выбранного "
+            "склада МоегоСклада. Они включены в план с физическим "
+            "остатком 0: "
             + ", ".join(result.missing_stock_articles)
-            + ". Это может означать нулевой остаток, отсутствие товара "
-            "на этом складе либо несовпадение артикулов."
+            + ". Проверьте строгое сопоставление "
+            "`WB article` / `Ozon offer_id` / `МойСклад article`."
+        )
+
+    skipped_offer_ids = saved[
+        "ozon_skipped_non_matching_offer_ids"
+    ]
+
+    if skipped_offer_ids:
+        st.info(
+            "Из Ozon-потребления исключены товары других направлений, "
+            f"не начинающиеся с `{saved['ozon_offer_id_prefix']}`: "
+            f"{len(skipped_offer_ids)} уникальных offer_id."
         )
 
     with st.expander(
@@ -1703,7 +1800,7 @@ def render_short_term_plan_tab(client: WBClient) -> None:
         if result.normal_table.empty:
             st.info(
                 "Нет артикулов, полностью покрытых "
-                "недельным уровнем потребления."
+                "недельным FBS-потреблением."
             )
         else:
             render_short_term_plan_table(result.normal_table)
@@ -1718,21 +1815,34 @@ def render_short_term_plan_tab(client: WBClient) -> None:
             queue_table=result.queue_table,
             full_table=result.full_table,
             parameters={
-                "Период WB FBS-потребления": (
+                "Период анализа": (
                     f"{saved['period_start'].strftime('%d.%m.%Y')} — "
                     f"{saved['period_end'].strftime('%d.%m.%Y')}"
                 ),
-                "Источник потребления": (
+                "Источник WB": (
                     "Завершённые WB FBS-поставки "
                     "(done = true, closedAt в периоде)"
                 ),
-                "Префикс WB FBS-поставок": saved[
-                    "supply_name_prefix"
-                ],
-                "Целевой уровень запаса": (
-                    "Фактическое выбытие WB FBS за 7 дней"
+                "Фильтр WB-поставок": (
+                    saved["supply_name_prefix"]
                 ),
-                "Склад готовой продукции": saved["store_name"],
+                "Источник Ozon": (
+                    "POST /v4/posting/fbs/list, "
+                    "фактическая дата передачи: delivering_date"
+                ),
+                "Статусы Ozon, включённые в потребление": (
+                    ", ".join(COMPLETED_FBS_STATUSES)
+                ),
+                "Фильтр Ozon offer_id": (
+                    "Точный регистрозависимый префикс "
+                    f"{saved['ozon_offer_id_prefix']}"
+                ),
+                "Целевой уровень запаса": (
+                    "Фактическое выбытие WB FBS + Ozon FBS за 7 дней"
+                ),
+                "Склад готовой продукции МоегоСклада": (
+                    saved["store_name"]
+                ),
                 "UUID склада": saved["store_id"],
                 "Резервы МоегоСклада": (
                     "Не учитываются на первом этапе"
@@ -1752,7 +1862,7 @@ def render_short_term_plan_tab(client: WBClient) -> None:
             label="📊 Скачать краткосрочный план XLSX",
             data=export_bytes,
             file_name=(
-                f"wb_fbs_short_term_plan_{file_timestamp}.xlsx"
+                f"fbs_short_term_plan_{file_timestamp}.xlsx"
             ),
             mime=(
                 "application/vnd.openxmlformats-officedocument"
@@ -1770,21 +1880,22 @@ def render_short_term_plan_tab(client: WBClient) -> None:
     ):
         st.markdown(
             """
-            - **WB FBS, завершено за 7 дней** — количество сборочных
-              заданий, вошедших в WB-поставки с названием `Накл...`,
-              завершённые за последние семь полных дней.
-            - **Физический остаток** — поле `stock` выбранного склада
-              готовой продукции МоегоСклада.
-            - **Резервы** намеренно не участвуют в первом этапе:
-              FBO и FBS пока не разделены на независимые контуры.
-            - **Целевой остаток, 7 дней** — количество, фактически
-              выбывшее через завершённые WB FBS-поставки.
-            - **На триммер** — сколько единиц нужно провести
-              через триммер.
-            - **На упаковку** — сколько единиц нужно передать
-              на упаковку после триммера.
-            - **Критично** — остатка меньше чем на один день
-              среднего фактического WB FBS-потребления.
+            - **WB FBS, завершено за 7 дней** — количество заданий,
+              вошедших в завершённые WB-поставки с нужным префиксом.
+            - **Ozon FBS, завершено за 7 дней** — товары из Ozon
+              FBS-posting в статусах `delivering` и `sent_by_seller`,
+              отобранные по фактической дате `delivering_date`.
+            - **Всего FBS, завершено за 7 дней** — сумма фактического
+              WB FBS- и Ozon FBS-выбытия.
+            - **Среднее выбытие FBS в день** — общий недельный объём,
+              делённый на 7.
+            - **Физический остаток** — только поле `stock` выбранного
+              склада готовой продукции МоегоСклада.
+            - **Резервы** намеренно не участвуют в первом этапе.
+            - **На триммер** и **На упаковку** — общий FBS-дефицит
+              готовой продукции.
+            - **Критично** — остатка меньше чем на один день среднего
+              фактического FBS-потребления.
             - **Срочно** — остатка от одного до двух дней.
             """
         )
@@ -1797,8 +1908,8 @@ def render_short_term_plan_tab(client: WBClient) -> None:
 def render_sidebar() -> None:
     """Отображает глобальную боковую панель SPA."""
     with st.sidebar:
-        st.markdown("## 📦 WB FBS")
-        st.caption("Стикеры и краткосрочное планирование")
+        st.markdown("## 📦 FBS")
+        st.caption("Стикеры WB и краткосрочное планирование FBS")
 
         st.divider()
 
@@ -1806,8 +1917,8 @@ def render_sidebar() -> None:
         st.markdown(
             """
             - **Стикеры WB FBS** — выбор поставок, PDF и XLSX.
-            - **Краткосрочный план WB FBS** — остатки против
-              фактического недельного выбытия.
+            - **Краткосрочный план FBS** — WB FBS + Ozon FBS против
+              физического остатка готовой продукции.
             """
         )
 
@@ -1816,7 +1927,7 @@ def render_sidebar() -> None:
         st.markdown("**Планирование: порядок работы**")
         st.markdown(
             """
-            1. Соберите утренние FBS-заказы.
+            1. Соберите утренние FBS-заказы WB и Ozon.
             2. Проведите отгрузку в МоемСкладе.
             3. Откройте вкладку планирования.
             4. Нажмите «Обновить потребности».
@@ -1856,22 +1967,22 @@ def main() -> None:
         st.error("Добавьте `WB_API_TOKEN` в Streamlit Secrets.")
         st.stop()
 
-    client = WBClient(token=wb_token)
+    wb_client = WBClient(token=wb_token)
 
     render_sidebar()
 
     stickers_tab, planning_tab = st.tabs(
         [
             "📦 Стикеры WB FBS",
-            "⚡ Краткосрочный план WB FBS",
+            "⚡ Краткосрочный план FBS",
         ]
     )
 
     with stickers_tab:
-        render_stickers_tab(client)
+        render_stickers_tab(wb_client)
 
     with planning_tab:
-        render_short_term_plan_tab(client)
+        render_short_term_plan_tab(wb_client)
 
 
 if __name__ == "__main__":

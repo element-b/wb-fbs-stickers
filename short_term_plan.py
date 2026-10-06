@@ -6,7 +6,7 @@ import pandas as pd
 
 
 class ShortTermPlanError(RuntimeError):
-    """Ошибка формирования краткосрочного WB FBS-плана."""
+    """Ошибка формирования краткосрочного FBS-плана."""
 
 
 @dataclass(frozen=True)
@@ -16,12 +16,17 @@ class ShortTermPlanResult:
     queue_table: pd.DataFrame
     full_table: pd.DataFrame
     normal_table: pd.DataFrame
+
+    total_wb_completed_units: int
+    total_ozon_completed_units: int
     total_completed_units: int
     total_need_to_finish: int
+
     critical_count: int
     urgent_count: int
     replenish_count: int
     normal_count: int
+
     missing_stock_articles: list[str]
 
 
@@ -29,7 +34,12 @@ def _as_nonnegative_int(
     value: object,
     field_name: str,
 ) -> int:
-    """Проверяет количество завершённых WB FBS-заданий."""
+    """Проверяет количество фактического потребления."""
+    if isinstance(value, bool):
+        raise ShortTermPlanError(
+            f"Некорректное значение `{field_name}`."
+        )
+
     try:
         number = int(value)
     except (TypeError, ValueError) as error:
@@ -43,6 +53,68 @@ def _as_nonnegative_int(
         )
 
     return number
+
+
+def _normalize_demand(
+    values: dict[str, int],
+    source_name: str,
+) -> dict[str, int]:
+    """
+    Нормализует спрос по артикулу.
+
+    Допустимо удалить только внешние пробелы.
+    Регистр, внутренние пробелы, суффиксы и символы не меняются.
+    """
+    normalized: dict[str, int] = {}
+
+    for article, quantity in values.items():
+        clean_article = str(article or "").strip()
+
+        if not clean_article:
+            raise ShortTermPlanError(
+                f"Получен пустой артикул в источнике `{source_name}`."
+            )
+
+        normalized[clean_article] = (
+            normalized.get(clean_article, 0)
+            + _as_nonnegative_int(
+                value=quantity,
+                field_name=(
+                    f"потребление {source_name} "
+                    f"для артикула `{clean_article}`"
+                ),
+            )
+        )
+
+    return {
+        article: quantity
+        for article, quantity in normalized.items()
+        if quantity > 0
+    }
+
+
+def _normalize_stock(
+    values: dict[str, int],
+) -> dict[str, int]:
+    """Нормализует физические остатки МоегоСклада."""
+    normalized: dict[str, int] = {}
+
+    for article, quantity in values.items():
+        clean_article = str(article or "").strip()
+
+        if not clean_article:
+            continue
+
+        try:
+            stock = int(quantity)
+        except (TypeError, ValueError) as error:
+            raise ShortTermPlanError(
+                f"Некорректный остаток у артикула `{clean_article}`."
+            ) from error
+
+        normalized[clean_article] = stock
+
+    return normalized
 
 
 def _priority(
@@ -79,74 +151,59 @@ def _priority(
 
 
 def build_short_term_plan(
-    completed_fbs_by_article: dict[str, int],
+    completed_wb_fbs_by_article: dict[str, int],
+    completed_ozon_fbs_by_article: dict[str, int],
     physical_stock_by_article: dict[str, int],
 ) -> ShortTermPlanResult:
     """
-    Формирует краткосрочный план пополнения готовой продукции WB FBS.
+    Формирует общую краткосрочную очередь WB FBS + Ozon FBS.
 
-    Источник недельной потребности — сборочные задания, входящие
-    в завершённые WB FBS-поставки за последние семь завершённых дней.
+    Правила:
 
-    Правила первого этапа:
-
-    - целевой остаток равен фактическому выбытию за неделю;
-    - используется только физический остаток `stock`;
-    - reserve и quantity МоегоСклада не используются;
-    - рулоны считаются заранее подготовленными;
+    - TargetStock равен общему фактическому FBS-выбытию за 7 дней;
+    - используется только `stock` МоегоСклада;
+    - reserve, quantity и inTransit не учитываются;
+    - WB article, Ozon offer_id и МойСклад article сопоставляются строго;
+    - разрешается удалить только внешние пробелы;
     - количество на триммер равно количеству на упаковку.
     """
-    normalized_demand: dict[str, int] = {}
+    normalized_wb = _normalize_demand(
+        values=completed_wb_fbs_by_article,
+        source_name="WB FBS",
+    )
 
-    for article, quantity in completed_fbs_by_article.items():
-        clean_article = str(article or "").strip()
+    normalized_ozon = _normalize_demand(
+        values=completed_ozon_fbs_by_article,
+        source_name="Ozon FBS",
+    )
 
-        if not clean_article:
-            continue
+    normalized_stock = _normalize_stock(
+        values=physical_stock_by_article,
+    )
 
-        normalized_demand[clean_article] = _as_nonnegative_int(
-            value=quantity,
-            field_name=(
-                "потребление WB FBS "
-                f"для артикула `{clean_article}`"
-            ),
-        )
+    all_articles = sorted(
+        set(normalized_wb) | set(normalized_ozon),
+        key=lambda value: (value.casefold(), value),
+    )
 
-    normalized_demand = {
-        article: quantity
-        for article, quantity in normalized_demand.items()
-        if quantity > 0
-    }
-
-    if not normalized_demand:
+    if not all_articles:
         raise ShortTermPlanError(
             "За последние 7 завершённых дней не найдено "
-            "завершённых WB FBS-поставок с заданиями."
+            "фактического FBS-потребления WB и Ozon."
         )
-
-    normalized_stock: dict[str, int] = {}
-
-    for article, quantity in physical_stock_by_article.items():
-        clean_article = str(article or "").strip()
-
-        if not clean_article:
-            continue
-
-        try:
-            normalized_stock[clean_article] = int(quantity)
-        except (TypeError, ValueError) as error:
-            raise ShortTermPlanError(
-                f"Некорректный остаток у артикула `{clean_article}`."
-            ) from error
 
     internal_rows: list[dict] = []
     missing_stock_articles: list[str] = []
 
-    for article in sorted(
-        normalized_demand,
-        key=lambda value: (value.casefold(), value),
-    ):
-        completed_units = normalized_demand[article]
+    for article in all_articles:
+        wb_completed_units = normalized_wb.get(article, 0)
+        ozon_completed_units = normalized_ozon.get(article, 0)
+
+        completed_units = (
+            wb_completed_units
+            + ozon_completed_units
+        )
+
         average_daily_demand = completed_units / 7
 
         physical_stock = normalized_stock.get(article, 0)
@@ -178,8 +235,16 @@ def build_short_term_plan(
                 "_coverage_days_raw": coverage_days,
                 "Приоритет": status,
                 "Артикул": article,
-                "WB FBS, завершено за 7 дней": completed_units,
-                "Среднее выбытие WB FBS в день": round(
+                "WB FBS, завершено за 7 дней": (
+                    wb_completed_units
+                ),
+                "Ozon FBS, завершено за 7 дней": (
+                    ozon_completed_units
+                ),
+                "Всего FBS, завершено за 7 дней": (
+                    completed_units
+                ),
+                "Среднее выбытие FBS в день": round(
                     average_daily_demand,
                     2,
                 ),
@@ -189,7 +254,9 @@ def build_short_term_plan(
                     2,
                 ),
                 "Целевой остаток, 7 дней": target_stock,
-                "Нужно довести до готовой продукции": need_to_finish,
+                "Нужно довести до готовой продукции": (
+                    need_to_finish
+                ),
                 "На триммер": need_to_finish,
                 "На упаковку": need_to_finish,
                 "Действие": action,
@@ -201,7 +268,7 @@ def build_short_term_plan(
             row["_priority_number"],
             row["_coverage_days_raw"],
             -row["Нужно довести до готовой продукции"],
-            -row["WB FBS, завершено за 7 дней"],
+            -row["Всего FBS, завершено за 7 дней"],
             row["Артикул"].casefold(),
             row["Артикул"],
         )
@@ -211,7 +278,9 @@ def build_short_term_plan(
         "Приоритет",
         "Артикул",
         "WB FBS, завершено за 7 дней",
-        "Среднее выбытие WB FBS в день",
+        "Ozon FBS, завершено за 7 дней",
+        "Всего FBS, завершено за 7 дней",
+        "Среднее выбытие FBS в день",
         "Физический остаток",
         "Покрытие, дней",
         "Целевой остаток, 7 дней",
@@ -243,7 +312,16 @@ def build_short_term_plan(
         queue_table=queue_table,
         full_table=full_table,
         normal_table=normal_table,
-        total_completed_units=sum(normalized_demand.values()),
+        total_wb_completed_units=sum(
+            normalized_wb.values()
+        ),
+        total_ozon_completed_units=sum(
+            normalized_ozon.values()
+        ),
+        total_completed_units=(
+            sum(normalized_wb.values())
+            + sum(normalized_ozon.values())
+        ),
         total_need_to_finish=int(
             queue_table[
                 "Нужно довести до готовой продукции"
