@@ -425,7 +425,7 @@ class OzonClient:
                 "statuses": list(COMPLETED_FBS_STATUSES),
             },
             "limit": MAX_PAGE_SIZE,
-            "sort_dir": "ASC",
+            "sort_dir": "asc",
             "translit": False,
             "with": {
                 "analytics_data": False,
