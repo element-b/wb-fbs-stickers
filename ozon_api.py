@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, time as datetime_time, timedelta, timezone
+from datetime import (
+    date,
+    datetime,
+    time as datetime_time,
+    timedelta,
+    timezone,
+)
 from zoneinfo import ZoneInfo
 
 import requests
@@ -12,18 +18,28 @@ BASE_URL = "https://api-seller.ozon.ru"
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
-# Консервативный последовательный режим для ручного ежедневного запуска.
+# Консервативный последовательный режим для ручного запуска из Streamlit.
 MIN_REQUEST_INTERVAL_SECONDS = 0.25
 
-# Для первого стабильного внедрения используем небольшой и безопасный размер
-# страницы. Пагинация реализована через cursor и has_next.
+# Небольшой размер страницы снижает риск проблем валидации и позволяет
+# корректно пройти cursor-пагинацию.
 PAGE_SIZE = 100
 
-# Согласованные статусы: товар уже передан в доставку / покинул склад.
+# Статусы, согласованные для производственного контура.
+#
+# Важно:
+# `sent_by_seller` не разрешён Ozon в filter.statuses для
+# /v4/posting/fbs/list, поэтому эти статусы НЕ передаются в API-запросе.
+# Они проверяются только локально после получения FBS-posting.
 COMPLETED_FBS_STATUSES = (
     "delivering",
     "sent_by_seller",
 )
+
+# Период получения списка posting расширяется назад относительно
+# целевых семи дней. Posting мог быть создан раньше, но передан
+# в доставку в нужный день.
+DEFAULT_QUERY_LOOKBACK_DAYS = 31
 
 
 class OzonApiError(RuntimeError):
@@ -40,7 +56,7 @@ class OzonApiError(RuntimeError):
 
 @dataclass(frozen=True)
 class OzonFbsDemandResult:
-    """Итог чтения фактического Ozon FBS-потребления."""
+    """Результат чтения фактического Ozon FBS-потребления."""
 
     demand_by_offer_id: dict[str, int]
     included_posting_count: int
@@ -51,10 +67,10 @@ def _parse_ozon_datetime(
     value: object,
 ) -> datetime | None:
     """
-    Преобразует ISO-даты Ozon в Europe/Moscow.
+    Преобразует ISO-дату Ozon в Europe/Moscow.
 
-    Значение без timezone намеренно не интерпретируется:
-    это может ошибочно включить posting на границе московского дня.
+    Значение без timezone намеренно не трактуется как UTC или Москва:
+    это могло бы ошибочно включить posting в неверный календарный день.
     """
     if not isinstance(value, str) or not value.strip():
         return None
@@ -89,9 +105,9 @@ def _period_boundaries(
     date_to: date,
 ) -> tuple[datetime, datetime]:
     """
-    Возвращает границы московского периода.
+    Возвращает границы московского календарного периода.
 
-    Левая граница включительна, правая исключительна.
+    Левая граница включительна, правая граница исключительна.
     """
     period_start = datetime.combine(
         date_from,
@@ -114,14 +130,8 @@ def _safe_ozon_error_hint(
     """
     Возвращает короткое безопасное пояснение Ozon к HTTP-ошибке.
 
-    Не выводятся:
-    - API-ключ;
-    - Client-Id;
-    - заголовки;
-    - полный ответ;
-    - потенциально персональные данные из posting.
-
-    Используются только короткие стандартные поля ошибки API.
+    Не выводятся API-ключи, Client-Id, заголовки, полный JSON и данные
+    отправлений. Используются только типовые текстовые поля ошибки.
     """
     try:
         payload = response.json()
@@ -131,22 +141,21 @@ def _safe_ozon_error_hint(
     if not isinstance(payload, dict):
         return ""
 
-    candidates = [
-        payload.get("message"),
-        payload.get("error"),
-        payload.get("details"),
-        payload.get("description"),
-    ]
+    for field_name in (
+        "message",
+        "error",
+        "details",
+        "description",
+    ):
+        value = payload.get(field_name)
 
-    for value in candidates:
         if not isinstance(value, str):
             continue
 
         text = " ".join(value.split())
 
         if text:
-            # Ограничение длины исключает вывод большого тела ответа.
-            return text[:300]
+            return text[:350]
 
     return ""
 
@@ -159,8 +168,13 @@ class OzonClient:
 
     POST /v4/posting/fbs/list
 
-    Никакие документы, posting, остатки, задания или поставки не создаются,
-    не изменяются и не отменяются.
+    Клиент не создаёт, не изменяет, не подтверждает и не отменяет:
+    - FBS-posting;
+    - поставки;
+    - отгрузки;
+    - остатки;
+    - документы;
+    - задания.
     """
 
     def __init__(
@@ -194,8 +208,9 @@ class OzonClient:
         )
 
     def _wait_for_rate_limit(self) -> None:
-        """Соблюдает консервативный интервал между запросами."""
+        """Выдерживает безопасный интервал между запросами."""
         elapsed = time.monotonic() - self._last_request_at
+
         delay = MIN_REQUEST_INTERVAL_SECONDS - elapsed
 
         if delay > 0:
@@ -206,7 +221,7 @@ class OzonClient:
         response: requests.Response,
         attempt: int,
     ) -> float:
-        """Возвращает задержку перед безопасной повторной попыткой."""
+        """Определяет задержку перед повторной попыткой."""
         retry_after = response.headers.get("Retry-After")
 
         if retry_after:
@@ -228,7 +243,12 @@ class OzonClient:
         """
         Выполняет POST-запрос с ограниченными повторами.
 
-        Повторяются только сетевые ошибки, HTTP 429 и HTTP 5xx.
+        Повторы выполняются только для:
+        - сетевых ошибок;
+        - HTTP 429;
+        - HTTP 5xx.
+
+        Тело ответа, ключ и заголовки авторизации не выводятся.
         """
         url = f"{BASE_URL}{path}"
 
@@ -263,8 +283,8 @@ class OzonClient:
 
             if response.status_code == 403:
                 raise OzonApiError(
-                    "Ozon отказал в доступе. Проверьте права "
-                    "API-ключа на чтение FBS-отправлений.",
+                    "Ozon отказал в доступе. Проверьте права API-ключа "
+                    "на чтение FBS-отправлений.",
                     status=403,
                 )
 
@@ -340,11 +360,18 @@ class OzonClient:
         posting_number: str,
         offer_id: str,
     ) -> int:
-        """Проверяет, что quantity — положительное целое число."""
+        """
+        Проверяет, что quantity — положительное целое количество.
+
+        Проверка вызывается только после фильтра NAKL_, поэтому проблема
+        с количеством у трусов, маек и других нецелевых товаров не
+        блокирует производственный расчёт наклеек.
+        """
         if isinstance(value, bool):
             raise OzonApiError(
                 "Ozon вернул некорректное количество товара "
-                f"в отправлении `{posting_number}`."
+                f"в отправлении `{posting_number}` "
+                f"для offer_id `{offer_id}`."
             )
 
         if isinstance(value, float) and not value.is_integer():
@@ -376,7 +403,11 @@ class OzonClient:
     def _posting_is_test(
         posting: dict,
     ) -> bool:
-        """Исключает тестовые posting, если API вернул технический флаг."""
+        """
+        Исключает тестовые posting, если API возвращает технический флаг.
+
+        Если поле отсутствует, posting не считается тестовым автоматически.
+        """
         return bool(
             posting.get("is_test")
             or posting.get("is_test_order")
@@ -386,7 +417,7 @@ class OzonClient:
     def _posting_cancelled_after_ship(
         posting: dict,
     ) -> bool:
-        """Исключает отправления, отменённые после отгрузки."""
+        """Исключает posting, отменённые после отгрузки."""
         cancellation = posting.get("cancellation")
 
         if not isinstance(cancellation, dict):
@@ -401,10 +432,11 @@ class OzonClient:
         posting: dict,
     ) -> tuple[str, str, tuple[tuple[str, str], ...]]:
         """
-        Возвращает безопасный отпечаток posting для проверки дублей.
+        Формирует безопасный отпечаток posting для проверки дублей.
 
-        Если один posting_number вернулся дважды с различными данными,
-        расчёт останавливается, а не выбирает версию произвольно.
+        При повторе одного `posting_number` с разными данными расчёт
+        останавливается. Нельзя выбирать версию произвольно и рисковать
+        двойным учётом.
         """
         status = str(posting.get("status") or "").strip()
 
@@ -452,25 +484,17 @@ class OzonClient:
         """
         Получает одну страницу FBS-posting.
 
-        Для стабильности используется минимальное тело v4:
+        Важно: `filter.statuses` здесь намеренно НЕ передаётся.
 
-        - `cursor`;
-        - `filter.since`;
-        - `filter.to`;
-        - `filter.statuses`;
-        - `limit`;
-        - `sort_dir`.
-
-        Необязательные поля `with`, `translit` и другие поля намеренно
-        не отправляются: они не нужны для расчёта и не должны быть причиной
-        ошибки валидации запроса.
+        Ozon не принимает `sent_by_seller` как значение этого фильтра
+        для `/v4/posting/fbs/list`. Статусы фильтруются локально после
+        получения данных.
         """
         payload = {
             "cursor": cursor,
             "filter": {
                 "since": _to_utc_iso(since),
                 "to": _to_utc_iso(to),
-                "statuses": list(COMPLETED_FBS_STATUSES),
             },
             "limit": PAGE_SIZE,
             "sort_dir": "asc",
@@ -520,7 +544,7 @@ class OzonClient:
         since: datetime,
         to: datetime,
     ) -> list[dict]:
-        """Получает все страницы Ozon FBS-posting через cursor-пагинацию."""
+        """Получает все страницы через cursor-пагинацию Ozon."""
         all_postings: list[dict] = []
 
         cursor = ""
@@ -561,28 +585,39 @@ class OzonClient:
         date_from: date,
         date_to: date,
         offer_id_prefix: str = "NAKL_",
+        query_lookback_days: int = (
+            DEFAULT_QUERY_LOOKBACK_DAYS
+        ),
     ) -> OzonFbsDemandResult:
         """
         Возвращает фактическое Ozon FBS-потребление по offer_id.
 
-        Включаются только posting:
+        В производственное потребление входят только posting:
 
-        - status: `delivering` или `sent_by_seller`;
-        - `delivering_date` в нужном московском периоде;
+        - со статусом `delivering` или `sent_by_seller`;
+        - с заполненным `delivering_date`;
+        - у которых `delivering_date` входит в нужный московский период;
         - не тестовые;
         - не отменённые после отгрузки;
-        - с offer_id, начинающимся с точного регистрозависимого NAKL_.
+        - содержащие товары с offer_id, начинающимся с точного
+          регистрозависимого префикса `NAKL_`.
 
-        Период запроса равен периоду производственного анализа: 7 полностью
-        завершённых московских дней. Для текущего процесса это достаточно,
-        так как максимальная допустимая задержка FBS составляет 1–2 дня.
+        `filter.since` и `filter.to` запрашивают расширенный период:
+        posting мог быть создан раньше, но фактически передан в доставку
+        внутри нужных семи дней.
 
-        Финальная бизнес-проверка всё равно выполняется по delivering_date,
-        а не по дате создания posting.
+        Финальная проверка производственного периода выполняется только
+        по `delivering_date`.
         """
         if date_from > date_to:
             raise ValueError(
                 "Дата начала периода Ozon не может быть позже даты конца."
+            )
+
+        if query_lookback_days < 1:
+            raise ValueError(
+                "Период поиска Ozon FBS-posting должен быть "
+                "не меньше одного дня."
             )
 
         prefix = offer_id_prefix.strip()
@@ -597,8 +632,12 @@ class OzonClient:
             date_to=date_to,
         )
 
+        query_start = target_start - timedelta(
+            days=query_lookback_days
+        )
+
         postings = self._list_postings(
-            since=target_start,
+            since=query_start,
             to=target_end_exclusive,
         )
 
@@ -643,6 +682,9 @@ class OzonClient:
         for posting_number, posting in unique_postings.items():
             status = str(posting.get("status") or "").strip()
 
+            # Локальная фильтрация согласованных статусов.
+            # Не используем filter.statuses в API-запросе, поскольку Ozon
+            # не принимает sent_by_seller в валидации данного endpoint.
             if status not in COMPLETED_FBS_STATUSES:
                 continue
 
@@ -680,7 +722,7 @@ class OzonClient:
                     "не потерять фактическое потребление."
                 )
 
-            included_posting_count += 1
+            posting_has_matching_product = False
 
             for product in products:
                 if not isinstance(product, dict):
@@ -693,6 +735,8 @@ class OzonClient:
                     product.get("offer_id") or ""
                 ).strip()
 
+                # Нельзя установить принадлежность к NAKL_, если offer_id
+                # отсутствует. Поэтому это блокирующая ошибка.
                 if not offer_id:
                     raise OzonApiError(
                         "Ozon вернул товар без `offer_id` "
@@ -701,22 +745,27 @@ class OzonClient:
                         "потенциально неполную очередь."
                     )
 
-                quantity = self._as_positive_quantity(
-                    value=product.get("quantity"),
-                    posting_number=posting_number,
-                    offer_id=offer_id,
-                )
-
                 # Точное регистрозависимое сравнение.
                 # Изменены только внешние пробелы через strip().
                 if not offer_id.startswith(prefix):
                     skipped_non_matching_offer_ids.add(offer_id)
                     continue
 
+                quantity = self._as_positive_quantity(
+                    value=product.get("quantity"),
+                    posting_number=posting_number,
+                    offer_id=offer_id,
+                )
+
                 demand_by_offer_id[offer_id] = (
                     demand_by_offer_id.get(offer_id, 0)
                     + quantity
                 )
+
+                posting_has_matching_product = True
+
+            if posting_has_matching_product:
+                included_posting_count += 1
 
         return OzonFbsDemandResult(
             demand_by_offer_id=demand_by_offer_id,
