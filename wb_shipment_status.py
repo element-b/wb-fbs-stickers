@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
-from typing import Callable
+from datetime import date, datetime
+from typing import Any
 
 import pandas as pd
 import streamlit as st
@@ -276,7 +276,7 @@ def build_shipment_status_result(
     client: WBClient,
     selected_supplies: list[dict],
     article_lookback_days: int,
-) -> dict:
+) -> dict[str, Any]:
     """
     Получает статусы заданий выбранных завершённых поставок.
 
@@ -331,9 +331,8 @@ def build_shipment_status_result(
     supply_order_ids: dict[str, set[int]] = {}
     empty_supply_ids: list[str] = []
 
-    for supply_id, supply in supply_by_id.items():
+    for supply_id in supply_by_id:
         order_ids = client.supply_order_ids(supply_id)
-
         unique_order_ids = set(order_ids)
 
         if not unique_order_ids:
@@ -390,6 +389,7 @@ def build_shipment_status_result(
 
     for supply_id, supply in supply_by_id.items():
         supply_name = _make_supply_name(supply)
+
         cluster = extract_distribution_center(
             supply_name=supply.get("name"),
             supply_id=supply_id,
@@ -422,9 +422,7 @@ def build_shipment_status_result(
                 ).strip()
 
                 if not article:
-                    article = (
-                        "Не найден за выбранный период"
-                    )
+                    article = "Не найден за выбранный период"
                     missing_article_ids.append(order_id)
 
                 waiting_rows.append(
@@ -749,7 +747,7 @@ def _render_check_list(
 
 
 def _render_result(
-    result: dict,
+    result: dict[str, Any],
 ) -> None:
     """Отображает готовый результат проверки статусов."""
     st.divider()
@@ -989,20 +987,19 @@ def render_wb_shipment_status_tab(
     st.subheader("Фильтры завершённых поставок")
 
     today = datetime.now(MOSCOW_TZ).date()
-    default_date_from = today - timedelta(days=13)
 
     date_col, search_col = st.columns([1.4, 1.8])
 
     with date_col:
         selected_date_range = st.date_input(
             "Дата создания поставки",
-            value=(default_date_from, today),
+            value=(today, today),
             format="DD.MM.YYYY",
             key="shipment_status_date_range",
             help=(
                 "Фильтруется WB `createdAt` в часовом поясе "
-                "Europe/Moscow. По умолчанию показаны последние "
-                "14 календарных дней, включая сегодня."
+                "Europe/Moscow. По умолчанию отображаются "
+                "завершённые поставки, созданные сегодня."
             ),
         )
 
