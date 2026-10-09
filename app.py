@@ -26,6 +26,7 @@ from short_term_plan import (
     build_short_term_plan,
 )
 from wb_api import WBApiError, WBClient
+from wb_shipment_status import render_wb_shipment_status_tab
 
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
@@ -292,6 +293,9 @@ def init_session_state() -> None:
         "reprint_lookup_key": None,
         "reprint_lookup_error": None,
         "short_term_fbs_result": None,
+        "shipment_status_supplies": None,
+        "shipment_status_result": None,
+        "shipment_status_supply_widget_version": 0,
     }
 
     for key, value in defaults.items():
@@ -1556,8 +1560,6 @@ def render_short_term_plan_tab(
 
     today = datetime.now(MOSCOW_TZ).date()
 
-    # Семь полностью завершённых московских календарных дней.
-    # Текущий день намеренно не учитывается.
     period_end = today - timedelta(days=1)
     period_start = period_end - timedelta(days=6)
 
@@ -1908,7 +1910,9 @@ def render_sidebar() -> None:
     """Отображает глобальную боковую панель SPA."""
     with st.sidebar:
         st.markdown("## 📦 FBS")
-        st.caption("Стикеры WB и краткосрочное планирование FBS")
+        st.caption(
+            "Стикеры, планирование и контроль отгрузок WB FBS"
+        )
 
         st.divider()
 
@@ -1918,6 +1922,8 @@ def render_sidebar() -> None:
             - **Стикеры WB FBS** — выбор поставок, PDF и XLSX.
             - **Краткосрочный план FBS** — WB FBS + Ozon FBS против
               физического остатка готовой продукции.
+            - **Статус отгрузок WB по кластерам** — read-only контроль
+              статусов заданий завершённых WB-поставок.
             """
         )
 
@@ -1970,10 +1976,11 @@ def main() -> None:
 
     render_sidebar()
 
-    stickers_tab, planning_tab = st.tabs(
+    stickers_tab, planning_tab, shipment_status_tab = st.tabs(
         [
             "📦 Стикеры WB FBS",
             "⚡ Краткосрочный план FBS",
+            "🚚 Статус отгрузок WB по кластерам",
         ]
     )
 
@@ -1982,6 +1989,9 @@ def main() -> None:
 
     with planning_tab:
         render_short_term_plan_tab(wb_client)
+
+    with shipment_status_tab:
+        render_wb_shipment_status_tab(wb_client)
 
 
 if __name__ == "__main__":

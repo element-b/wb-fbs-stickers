@@ -10,8 +10,8 @@ import requests
 
 BASE_URL = "https://marketplace-api.wildberries.ru"
 
-# В документации FBS WB указан интервал 200 мс.
-# Добавлен небольшой запас, чтобы не упираться в лимит.
+# Документация WB для FBS: 300 запросов в минуту,
+# минимальный интервал 200 мс, burst до 20 запросов.
 MIN_REQUEST_INTERVAL_SECONDS = 0.21
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
@@ -72,13 +72,14 @@ def supply_is_done(supply: dict) -> bool:
 
 class WBClient:
     """
-    Клиент WB Marketplace API.
+    Read-only клиент WB Marketplace API.
 
     Выполняет только операции чтения:
 
     - получение списка поставок;
     - получение ID сборочных заданий поставки;
     - получение данных сборочных заданий;
+    - получение фактических статусов сборочных заданий;
     - получение оригинальных стикеров;
     - получение фактического недельного FBS-потребления
       по завершённым поставкам.
@@ -312,13 +313,155 @@ class WBClient:
 
         for value in order_ids:
             try:
-                result.append(int(value))
+                order_id = int(value)
             except (TypeError, ValueError) as error:
                 raise WBApiError(
                     "WB вернул некорректный ID сборочного задания."
                 ) from error
 
+            if order_id <= 0:
+                raise WBApiError(
+                    "WB вернул некорректный ID сборочного задания."
+                )
+
+            result.append(order_id)
+
         return result
+
+    def order_statuses_for_ids(
+        self,
+        target_ids: set[int],
+    ) -> dict[int, dict]:
+        """
+        Получает фактические статусы заданий WB.
+
+        Метод:
+        POST /api/v3/orders/status
+
+        Документация WB допускает от 1 до 1000 ID заданий в одном
+        запросе. Возвращаются:
+
+        - id;
+        - supplierStatus;
+        - wbStatus.
+
+        Расчёт блокируется при неполном, дублирующемся или содержащем
+        неожиданные ID ответе, чтобы не допустить двойного либо
+        частичного учёта сборочных заданий.
+        """
+        if not target_ids:
+            return {}
+
+        normalized_ids: set[int] = set()
+
+        for value in target_ids:
+            if isinstance(value, bool):
+                raise ValueError(
+                    "ID сборочного задания WB должен быть целым числом."
+                )
+
+            try:
+                order_id = int(value)
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "ID сборочного задания WB должен быть целым числом."
+                ) from error
+
+            if order_id <= 0:
+                raise ValueError(
+                    "ID сборочного задания WB должен быть положительным."
+                )
+
+            normalized_ids.add(order_id)
+
+        statuses: dict[int, dict] = {}
+
+        sorted_ids = sorted(normalized_ids)
+
+        for offset in range(0, len(sorted_ids), 1000):
+            batch = sorted_ids[offset:offset + 1000]
+
+            data = self._request(
+                method="POST",
+                path="/api/v3/orders/status",
+                json={
+                    "orders": batch,
+                },
+            )
+
+            response_orders = data.get("orders")
+
+            if not isinstance(response_orders, list):
+                raise WBApiError(
+                    "WB вернул неожиданный ответ со статусами "
+                    "сборочных заданий."
+                )
+
+            batch_ids = set(batch)
+
+            for raw_status in response_orders:
+                if not isinstance(raw_status, dict):
+                    raise WBApiError(
+                        "WB вернул некорректную строку статуса "
+                        "сборочного задания."
+                    )
+
+                try:
+                    order_id = int(raw_status["id"])
+                except (KeyError, TypeError, ValueError) as error:
+                    raise WBApiError(
+                        "WB вернул статус без корректного ID "
+                        "сборочного задания."
+                    ) from error
+
+                if order_id not in batch_ids:
+                    raise WBApiError(
+                        "WB вернул статус задания, которого не было "
+                        "в текущем запросе. Расчёт остановлен, "
+                        "чтобы исключить недостоверный учёт."
+                    )
+
+                if order_id in statuses:
+                    raise WBApiError(
+                        "WB вернул повторный статус одного и того же "
+                        "сборочного задания. Расчёт остановлен, "
+                        "чтобы исключить двойной учёт."
+                    )
+
+                supplier_status = raw_status.get("supplierStatus")
+                wb_status = raw_status.get("wbStatus")
+
+                statuses[order_id] = {
+                    "supplierStatus": (
+                        str(supplier_status).strip()
+                        if supplier_status is not None
+                        else ""
+                    ),
+                    "wbStatus": (
+                        str(wb_status).strip()
+                        if wb_status is not None
+                        else ""
+                    ),
+                }
+
+        missing_ids = sorted(normalized_ids - set(statuses))
+
+        if missing_ids:
+            shown = ", ".join(
+                str(order_id)
+                for order_id in missing_ids[:20]
+            )
+
+            if len(missing_ids) > 20:
+                shown += f" и ещё {len(missing_ids) - 20}"
+
+            raise WBApiError(
+                "WB не вернул статусы некоторых сборочных заданий: "
+                f"{shown}. Расчёт не выполнен, чтобы не показать "
+                "неполную сводку."
+            )
+
+        return statuses
 
     def orders_for_ids(
         self,
@@ -560,8 +703,6 @@ class WBClient:
         if not completed_supply_ids:
             return {}
 
-        # ID задания -> ID поставки.
-        # Нельзя учитывать одно задание дважды.
         order_to_supply: dict[int, str] = {}
 
         for supply_id in completed_supply_ids:
