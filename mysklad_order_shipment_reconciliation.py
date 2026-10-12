@@ -25,7 +25,7 @@ def _value_to_date(value: object) -> date | None:
 def _parse_date_range(
     selected_value: object,
 ) -> tuple[date | None, date | None]:
-    """Разбирает одиночную дату или диапазон из st.date_input."""
+    """Разбирает одиночную дату или диапазон из `st.date_input`."""
     if isinstance(selected_value, (tuple, list)):
         values = list(selected_value)
 
@@ -71,7 +71,7 @@ def _format_date_range(
 
 
 def _parse_moment(value: object) -> datetime | None:
-    """Преобразует moment МоегоСклада в datetime."""
+    """Преобразует `moment` МоегоСклада в datetime."""
     if not isinstance(value, str) or not value.strip():
         return None
 
@@ -90,7 +90,7 @@ def _parse_moment(value: object) -> datetime | None:
 
 
 def _format_moment(value: object) -> str:
-    """Форматирует дату документа для безопасного отображения."""
+    """Форматирует дату документа для интерфейса."""
     parsed = _parse_moment(value)
 
     if parsed is None:
@@ -100,7 +100,7 @@ def _format_moment(value: object) -> str:
 
 
 def _state_id_from_object(value: object) -> str:
-    """Извлекает ID статуса из объекта или meta.href."""
+    """Извлекает ID статуса из объекта либо `meta.href`."""
     if not isinstance(value, dict):
         return ""
 
@@ -123,7 +123,7 @@ def _state_id_from_object(value: object) -> str:
 
 
 def _entity_id(value: object) -> str:
-    """Извлекает ID сущности из поля id или meta.href."""
+    """Извлекает ID сущности из `id` либо `meta.href`."""
     if not isinstance(value, dict):
         return ""
 
@@ -156,7 +156,7 @@ def _build_state_name_map(
     states: list[dict],
     document_label: str,
 ) -> dict[str, str]:
-    """Строит соответствие ID статуса и названия статуса."""
+    """Строит соответствие ID статуса и названия."""
     result: dict[str, str] = {}
 
     for state in states:
@@ -198,12 +198,7 @@ def _status_name(
     document: dict,
     state_names: dict[str, str],
 ) -> str:
-    """
-    Возвращает название статуса документа.
-
-    Сначала используется название, которое пришло в самом документе.
-    Если его нет, используется ID статуса и справочник metadata.
-    """
+    """Возвращает название статуса документа."""
     state = document.get("state")
 
     if not isinstance(state, dict):
@@ -235,10 +230,10 @@ def _demand_number(demand: dict) -> str:
 
 def _linked_demand_ids(order: dict) -> list[str]:
     """
-    Возвращает уникальные ID отгрузок из связанных документов заказа.
+    Возвращает уникальные ID отгрузок из `customerorder.demands`.
 
-    Единственный источник связи — поле `customerorder.demands`.
-    Отгрузка, отсутствующая в этом поле, в расчёт не попадает.
+    Поле `demands` — основной и достаточный источник подтверждения,
+    что отгрузка связана с рассматриваемым заказом.
     """
     raw_demands = order.get("demands")
 
@@ -280,8 +275,8 @@ def _article_and_quantity(
     """
     Возвращает article и целое количество товарной позиции.
 
-    В сверке поддерживаются только позиции номенклатуры типа `product`
-    с неотрицательным целым количеством.
+    Для сверки учитываются только позиции типа `product` с целым
+    неотрицательным количеством.
     """
     assortment = position.get("assortment")
 
@@ -362,7 +357,7 @@ def _positions_by_article(
     document_number: str,
     document_label: str,
 ) -> dict[str, int]:
-    """Суммирует позиции документа по точному артикулу."""
+    """Суммирует товарные позиции документа по точному артикулу."""
     result: dict[str, int] = {}
 
     for position in positions:
@@ -387,7 +382,7 @@ def _order_label(
     order_id: str,
     order_by_id: dict[str, dict],
 ) -> str:
-    """Формирует короткую подпись заказа в списке выбора."""
+    """Формирует подпись заказа в списке Streamlit."""
     order = order_by_id[order_id]
 
     return (
@@ -405,7 +400,7 @@ def _copyable_telegram_text(
     """
     Формирует текст для ручной отправки в Telegram.
 
-    Номер каждого рассматриваемого заказа выводится обязательно.
+    Для каждого рассматриваемого заказа выводится его номер.
     """
     problems_by_order: dict[str, list[dict]] = defaultdict(list)
 
@@ -451,24 +446,23 @@ def _copyable_telegram_text(
             ),
         )
 
-        if order_problem_rows:
-            for row in order_problem_rows:
-                if row["Отклонение"] < 0:
-                    lines.append(
-                        "• "
-                        f"{row['Артикул']} — "
-                        f"заказано {row['Заказано']}, "
-                        f"отгружено {row['Отгружено']}, "
-                        f"недобор {abs(row['Отклонение'])}."
-                    )
-                else:
-                    lines.append(
-                        "• "
-                        f"{row['Артикул']} — "
-                        f"заказано {row['Заказано']}, "
-                        f"отгружено {row['Отгружено']}, "
-                        f"перебор {row['Отклонение']}."
-                    )
+        for row in order_problem_rows:
+            if row["Отклонение"] < 0:
+                lines.append(
+                    "• "
+                    f"{row['Артикул']} — "
+                    f"заказано {row['Заказано']}, "
+                    f"отгружено {row['Отгружено']}, "
+                    f"недобор {abs(row['Отклонение'])}."
+                )
+            else:
+                lines.append(
+                    "• "
+                    f"{row['Артикул']} — "
+                    f"заказано {row['Заказано']}, "
+                    f"отгружено {row['Отгружено']}, "
+                    f"перебор {row['Отклонение']}."
+                )
 
         order_excluded_rows = excluded_by_order.get(
             order_number,
@@ -498,10 +492,10 @@ def build_reconciliation_catalog(
     date_to: date,
 ) -> dict[str, Any]:
     """
-    Загружает список заказов покупателей по `moment`.
+    Загружает список заказов покупателей по `customerorder.moment`.
 
-    Контрагент не является обязательным: заказ можно выбрать вручную
-    только по номеру и дате документа.
+    Контрагент и статус намеренно не используются как предварительные
+    фильтры: пользователь выбирает нужные заказы вручную по номеру.
     """
     orders = client.customer_orders_by_moment(
         date_from=date_from,
@@ -564,17 +558,28 @@ def build_order_shipment_reconciliation(
     selected_order_ids: set[str],
 ) -> dict[str, Any]:
     """
-    Сверяет выбранные заказы покупателей и связанные отгрузки.
+    Сверяет выбранные заказы покупателей и их связанные отгрузки.
 
-    Условия включения отгрузки в расчёт:
+    Алгоритм:
 
-    - она указана в `customerorder.demands`;
-    - отгрузка обратной ссылкой `customerOrder` указывает на тот же заказ;
+    1. Загружается состав заказа: `article` и `quantity`.
+    2. Из `customerorder.demands` берутся все связанные отгрузки.
+    3. Для каждой отгрузки загружается состав: `article` и `quantity`.
+    4. Количество всех связанных отгрузок суммируется по article.
+    5. Считается отклонение:
+
+       `Отгружено - Заказано`.
+
+    Условия включения отгрузки:
+
+    - ID отгрузки присутствует в `customerorder.demands`;
     - статус отгрузки совпадает со статусом заказа;
-    - одна отгрузка не учитывается повторно для другого заказа.
+    - если API передал `demand.customerOrder`, он не должен ссылаться
+      на другой заказ;
+    - одна отгрузка не учитывается повторно в другом выбранном заказе.
 
-    Если заказ имеет несколько связанных корректных отгрузок, количество
-    их товарных позиций суммируется по артикулу.
+    Важно: отсутствие `demand.customerOrder` НЕ является причиной
+    исключения. Связь уже подтверждена массивом `demands` заказа.
     """
     order_rows = catalog.get("order_rows")
 
@@ -637,13 +642,14 @@ def build_order_shipment_reconciliation(
     problem_rows: list[dict] = []
     excluded_rows: list[dict] = []
 
-    checked_demand_ids: set[str] = set()
+    used_demand_ids: set[str] = set()
 
     compared_order_count = 0
     orders_without_demands_count = 0
     linked_demands_count = 0
     included_demands_count = 0
     excluded_demands_count = 0
+    demands_without_reverse_link_count = 0
 
     for catalog_row in selected_catalog_rows:
         order_id = catalog_row["id"]
@@ -699,6 +705,7 @@ def build_order_shipment_reconciliation(
 
         shipped_by_article: dict[str, int] = {}
         included_demand_numbers: list[str] = []
+        link_check_messages: list[str] = []
 
         for demand_id in linked_demand_ids:
             linked_demands_count += 1
@@ -714,33 +721,21 @@ def build_order_shipment_reconciliation(
                     "с запрошенным. Сверка остановлена."
                 )
 
-            reverse_order_id = _entity_id(
-                demand.get("customerOrder")
-            )
-
             demand_status = _status_name(
                 document=demand,
                 state_names=demand_state_names,
             )
 
+            reverse_order_id = _entity_id(
+                demand.get("customerOrder")
+            )
+
             reason = ""
 
-            if demand_id in checked_demand_ids:
+            if demand_id in used_demand_ids:
                 reason = (
                     "Эта отгрузка уже была учтена у другого "
                     "выбранного заказа. Повторный учёт заблокирован."
-                )
-
-            elif not reverse_order_id:
-                reason = (
-                    "В отгрузке отсутствует обратная связь "
-                    "с заказом покупателя."
-                )
-
-            elif reverse_order_id != order_id:
-                reason = (
-                    "Отгрузка обратной связью указывает "
-                    "на другой заказ покупателя."
                 )
 
             elif not demand_status:
@@ -758,6 +753,15 @@ def build_order_shipment_reconciliation(
                     "со статусом заказа."
                 )
 
+            elif (
+                reverse_order_id
+                and reverse_order_id != order_id
+            ):
+                reason = (
+                    "Отгрузка обратной связью указывает "
+                    "на другой заказ покупателя."
+                )
+
             if reason:
                 excluded_demands_count += 1
 
@@ -771,7 +775,17 @@ def build_order_shipment_reconciliation(
                 )
                 continue
 
-            checked_demand_ids.add(demand_id)
+            if not reverse_order_id:
+                demands_without_reverse_link_count += 1
+                link_check_messages.append(
+                    f"{demand_number}: связь подтверждена "
+                    "списком связанных документов заказа"
+                )
+            else:
+                link_check_messages.append(
+                    f"{demand_number}: связь подтверждена "
+                    "в обоих документах"
+                )
 
             demand_positions = client.demand_positions(
                 demand_id=demand_id,
@@ -790,6 +804,7 @@ def build_order_shipment_reconciliation(
                     + quantity
                 )
 
+            used_demand_ids.add(demand_id)
             included_demands_count += 1
             included_demand_numbers.append(demand_number)
 
@@ -798,6 +813,18 @@ def build_order_shipment_reconciliation(
         article_keys = sorted(
             set(ordered_by_article) | set(shipped_by_article),
             key=lambda value: (value.casefold(), value),
+        )
+
+        linked_demands_text = (
+            ", ".join(included_demand_numbers)
+            if included_demand_numbers
+            else "Нет подходящих отгрузок"
+        )
+
+        link_check_text = (
+            "; ".join(link_check_messages)
+            if link_check_messages
+            else "Нет включённых отгрузок"
         )
 
         for article in article_keys:
@@ -815,11 +842,8 @@ def build_order_shipment_reconciliation(
             detail_row = {
                 "Заказ": order_number,
                 "Статус": order_status,
-                "Связанные отгрузки": (
-                    ", ".join(included_demand_numbers)
-                    if included_demand_numbers
-                    else "Нет корректных отгрузок"
-                ),
+                "Связанные отгрузки": linked_demands_text,
+                "Проверка связи": link_check_text,
                 "Артикул": article,
                 "Заказано": ordered_quantity,
                 "Отгружено": shipped_quantity,
@@ -976,6 +1000,9 @@ def build_order_shipment_reconciliation(
         "linked_demands_count": linked_demands_count,
         "included_demands_count": included_demands_count,
         "excluded_demands_count": excluded_demands_count,
+        "demands_without_reverse_link_count": (
+            demands_without_reverse_link_count
+        ),
         "shortage_line_count": sum(
             row["Отклонение"] < 0
             for row in problem_rows
@@ -1004,7 +1031,7 @@ def build_order_shipment_reconciliation(
 def _render_aggregate_table(
     rows: list[dict],
 ) -> None:
-    """Показывает итоговую сводку отклонений по артикулам."""
+    """Показывает сводную таблицу по артикулам."""
     columns = [
         "Артикул",
         "В заказах",
@@ -1062,11 +1089,12 @@ def _render_aggregate_table(
 def _render_detail_table(
     rows: list[dict],
 ) -> None:
-    """Показывает детализацию сравнения по заказу и артикулу."""
+    """Показывает сравнение по заказу и артикулу."""
     columns = [
         "Заказ",
         "Статус",
         "Связанные отгрузки",
+        "Проверка связи",
         "Артикул",
         "Заказано",
         "Отгружено",
@@ -1091,6 +1119,10 @@ def _render_detail_table(
             ),
             "Связанные отгрузки": st.column_config.TextColumn(
                 "Связанные отгрузки",
+                width="large",
+            ),
+            "Проверка связи": st.column_config.TextColumn(
+                "Проверка связи",
                 width="large",
             ),
             "Артикул": st.column_config.TextColumn(
@@ -1120,7 +1152,7 @@ def _render_detail_table(
 def _render_excluded_table(
     rows: list[dict],
 ) -> None:
-    """Показывает связи, исключённые из расчёта."""
+    """Показывает связанные отгрузки, исключённые из расчёта."""
     columns = [
         "Заказ",
         "Статус заказа",
@@ -1158,7 +1190,7 @@ def _render_excluded_table(
 def _render_result(
     result: dict[str, Any],
 ) -> None:
-    """Отображает результат сверки заказов и связанных отгрузок."""
+    """Отображает результат сверки."""
     st.divider()
     st.subheader("📊 Сводка сверки")
 
@@ -1207,21 +1239,24 @@ def _render_result(
     )
 
     st.caption(
-        "Период фильтрует только дату `moment` заказов покупателей: "
+        "Период фильтрует только поле `customerorder.moment`: "
         f"**{_format_date_range(result['date_from'], result['date_to'])}**."
     )
 
     st.caption(
-        "Отгрузки учитываются только из связанных документов выбранного "
-        "заказа. Если в заказе несколько корректно связанных отгрузок, "
-        "их количество по артикулу суммируется."
+        "Артикулы и количество загружаются отдельно из позиций заказа "
+        "и из позиций каждой связанной отгрузки. Если у заказа несколько "
+        "связанных отгрузок, их количества суммируются по артикулу."
     )
 
-    st.caption(
-        "Отгрузка входит в расчёт только при совпадении её статуса "
-        "со статусом заказа и при подтверждённой обратной связи "
-        "с тем же заказом."
-    )
+    if result["demands_without_reverse_link_count"] > 0:
+        st.info(
+            "Учтено связанных отгрузок без поля обратной связи "
+            "`customerOrder`: "
+            f"**{result['demands_without_reverse_link_count']}**. "
+            "Они включены, поскольку связь уже подтверждена списком "
+            "связанных отгрузок выбранного заказа."
+        )
 
     if result["problem_rows"]:
         st.error(
@@ -1235,17 +1270,15 @@ def _render_result(
 
     if result["excluded_demands_count"] > 0:
         st.warning(
-            "Некоторые связанные отгрузки не вошли в расчёт: "
-            "у них не совпал статус либо не подтвердилась обратная "
-            "связь с заказом. Причины приведены ниже."
+            "Некоторые связанные отгрузки не вошли в расчёт. "
+            "Причины приведены в раскрывающемся блоке ниже."
         )
 
     st.divider()
     st.subheader("📋 Текст для Telegram")
 
     st.caption(
-        "В тексте обязательно указывается номер каждого "
-        "рассматриваемого заказа."
+        "В тексте указан номер каждого рассматриваемого заказа."
     )
 
     st.code(
@@ -1323,11 +1356,7 @@ def render_mysklad_order_shipment_reconciliation_tab() -> None:
     """
     Отображает вкладку ручной сверки заказов и связанных отгрузок.
 
-    Контрагент не используется как обязательный фильтр. Пользователь
-    самостоятельно выбирает нужные заказы по номеру после загрузки
-    списка за период.
-
-    Все запросы к МоемСкладу выполняются только методом GET.
+    Все обращения к API МоегоСклада используют только GET-запросы.
     """
     st.title("⚖️ Сверка заказов и отгрузок FBO")
 
@@ -1335,18 +1364,18 @@ def render_mysklad_order_shipment_reconciliation_tab() -> None:
         """
         <div class="description-box">
             Выберите период по дате заказа, загрузите список и вручную
-            выберите интересующие заказы по номеру. Приложение сравнит
-            количество товаров в заказе с количеством в его связанных
-            отгрузках и покажет недобор или перебор.
+            выберите нужные заказы по номеру. Приложение одновременно
+            загружает артикулы и количество из заказа и из его связанных
+            отгрузок, затем показывает недобор или перебор.
         </div>
         """,
         unsafe_allow_html=True,
     )
 
     st.caption(
-        "Контрагент не обязателен для этой версии сверки. "
-        "Направление FBO WB / FBO Ozon определяется вручную выбором "
-        "нужного заказа из списка."
+        "Связанные отгрузки определяются через `demands` выбранного "
+        "заказа. Статус связанной отгрузки должен совпадать со статусом "
+        "заказа."
     )
 
     mysklad_token = _get_mysklad_token()
@@ -1518,7 +1547,7 @@ def render_mysklad_order_shipment_reconciliation_tab() -> None:
         placeholder="Введите номер заказа и выберите его",
         help=(
             "Можно выбрать один или несколько заказов. "
-            "Поиск внутри списка Streamlit работает по номеру заказа."
+            "Поиск Streamlit работает по номеру заказа."
         ),
     )
 
@@ -1590,8 +1619,8 @@ def render_mysklad_order_shipment_reconciliation_tab() -> None:
 
         try:
             with st.spinner(
-                "Получаю связанные отгрузки, проверяю статусы "
-                "и суммирую товары по артикулам…"
+                "Загружаю артикулы и количество заказа, затем "
+                "артикулы и количество всех связанных отгрузок…"
             ):
                 result = build_order_shipment_reconciliation(
                     client=client,
