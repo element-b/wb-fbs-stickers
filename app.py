@@ -10,6 +10,9 @@ import streamlit as st
 
 from mysklad_api import MySkladApiError, MySkladClient
 from mysklad_export import make_mysklad_xlsx
+from mysklad_order_shipment_reconciliation import (
+    render_mysklad_order_shipment_reconciliation_tab,
+)
 from mysklad_shipment_report import render_mysklad_shipments_tab
 from ozon_api import (
     COMPLETED_FBS_STATUSES,
@@ -298,6 +301,9 @@ def init_session_state() -> None:
         "shipment_status_result": None,
         "shipment_status_supply_widget_version": 0,
         "mysklad_shipment_report_result": None,
+        "mysklad_reconciliation_catalog": None,
+        "mysklad_reconciliation_result": None,
+        "mysklad_reconciliation_order_widget_version": 0,
     }
 
     for key, value in defaults.items():
@@ -444,7 +450,7 @@ def get_secret(name: str) -> str:
 # ============================================================
 
 def parse_created_at(value: object) -> datetime | None:
-    """Преобразует WB `createdAt` в дату и время Europe/Moscow."""
+    """Преобразует WB createdAt в Europe/Moscow."""
     if not isinstance(value, str) or not value.strip():
         return None
 
@@ -494,7 +500,7 @@ def format_supply_label(supply: dict) -> str:
 
 
 def value_to_date(value: object) -> date | None:
-    """Преобразует значение Streamlit в объект date."""
+    """Преобразует значение Streamlit в date."""
     if isinstance(value, datetime):
         return value.date()
 
@@ -507,7 +513,7 @@ def value_to_date(value: object) -> date | None:
 def parse_date_range(
     selected_value: object,
 ) -> tuple[date | None, date | None]:
-    """Получает начальную и конечную дату из Streamlit date_input."""
+    """Получает начальную и конечную дату из st.date_input."""
     if isinstance(selected_value, (tuple, list)):
         values = list(selected_value)
 
@@ -585,6 +591,7 @@ def sort_supply_ids(
     supply_by_id: dict[str, dict],
 ) -> list[str]:
     """Сортирует поставки: новые сверху."""
+
     def sort_key(supply_id: str) -> tuple[float, str, str]:
         supply = supply_by_id[supply_id]
         created_at = parse_created_at(supply.get("createdAt"))
@@ -609,14 +616,7 @@ def sort_supply_ids(
 # ============================================================
 
 def parse_sticker_code(value: str) -> str | None:
-    """
-    Принимает код в форматах:
-
-    - 231648 9753;
-    - 231648-9753;
-    - 231648/9753;
-    - 231648,9753.
-    """
+    """Преобразует код стикера в формат partA partB."""
     match = re.fullmatch(
         r"\s*(\d+)\s*[\s,;/\-]+\s*(\d+)\s*",
         value or "",
@@ -1357,13 +1357,7 @@ def ensure_short_term_configuration(
     ozon_client_id: str,
     ozon_api_key: str,
 ) -> bool:
-    """
-    Проверяет Secrets, необходимые только для вкладки планирования.
-
-    Возвращает False, а не останавливает всё приложение, чтобы вкладка
-    печати стикеров оставалась доступной даже при неполной настройке
-    МоегоСклада или Ozon.
-    """
+    """Проверяет Secrets, необходимые только для вкладки планирования."""
     missing = []
 
     if not mysklad_token:
@@ -1505,19 +1499,7 @@ def render_short_term_shift_list(
 def render_short_term_plan_tab(
     wb_client: WBClient,
 ) -> None:
-    """
-    Отображает общую краткосрочную очередь WB FBS + Ozon FBS.
-
-    WB:
-    завершённые поставки WB с префиксом «Накл».
-
-    Ozon:
-    FBS-posting в статусах delivering и sent_by_seller,
-    отобранные по delivering_date.
-
-    Остатки:
-    только физический stock выбранного склада МоегоСклада.
-    """
+    """Отображает общую краткосрочную очередь WB FBS + Ozon FBS."""
     st.title("⚡ Краткосрочный план FBS")
 
     st.markdown(
@@ -1913,7 +1895,7 @@ def render_sidebar() -> None:
     with st.sidebar:
         st.markdown("## 📦 FBS")
         st.caption(
-            "Стикеры, планирование и контроль отгрузок FBS"
+            "Стикеры, планирование и контроль FBS / FBO"
         )
 
         st.divider()
@@ -1926,8 +1908,10 @@ def render_sidebar() -> None:
               физического остатка готовой продукции.
             - **Статус отгрузок WB по кластерам** — read-only контроль
               статусов заданий завершённых WB-поставок.
-            - **Отгрузки МоегоСклада** — аудит количества товара во
-              всех отгрузках за период с разбивкой по статусам.
+            - **Отгрузки МоегоСклада** — количество товара в отгрузках
+              по выбранным статусам.
+            - **Сверка заказов и отгрузок FBO** — недобор и перебор
+              товаров по артикулам для выбранных контрагентов.
             """
         )
 
@@ -1985,12 +1969,14 @@ def main() -> None:
         planning_tab,
         shipment_status_tab,
         mysklad_shipments_tab,
+        reconciliation_tab,
     ) = st.tabs(
         [
             "📦 Стикеры WB FBS",
             "⚡ Краткосрочный план FBS",
             "🚚 Статус отгрузок WB по кластерам",
             "📊 Отгрузки МоегоСклада",
+            "⚖️ Сверка заказов и отгрузок FBO",
         ]
     )
 
@@ -2005,6 +1991,9 @@ def main() -> None:
 
     with mysklad_shipments_tab:
         render_mysklad_shipments_tab()
+
+    with reconciliation_tab:
+        render_mysklad_order_shipment_reconciliation_tab()
 
 
 if __name__ == "__main__":

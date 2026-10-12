@@ -63,10 +63,11 @@ class MySkladClient:
     Выполняет только GET-запросы:
 
     - карточка склада;
-    - отчёт «Остатки по складам»;
-    - метаданные и статусы отгрузок;
-    - список отгрузок;
-    - товарные позиции отгрузок.
+    - отчёт остатков;
+    - статусы заказов и отгрузок;
+    - заказы покупателей;
+    - отгрузки;
+    - товарные позиции заказов и отгрузок.
 
     Клиент не создаёт, не изменяет, не проводит и не удаляет документы.
     """
@@ -96,7 +97,7 @@ class MySkladClient:
         )
 
     def _wait_for_rate_limit(self) -> None:
-        """Выдерживает небольшой интервал между запросами."""
+        """Выдерживает безопасный интервал между запросами."""
         elapsed = time.monotonic() - self._last_request_at
         delay = MIN_REQUEST_INTERVAL_SECONDS - elapsed
 
@@ -108,7 +109,7 @@ class MySkladClient:
         response: requests.Response,
         attempt: int,
     ) -> float:
-        """Определяет безопасную задержку перед повторным запросом."""
+        """Определяет задержку перед повторным запросом."""
         retry_after = (
             response.headers.get("X-Lognex-Retry-After")
             or response.headers.get("Retry-After")
@@ -130,7 +131,11 @@ class MySkladClient:
         path: str,
         params: dict[str, object] | None = None,
     ) -> dict:
-        """Выполняет GET-запрос к МоемСкладу с повторами."""
+        """
+        Выполняет GET-запрос к МоемСкладу с ограниченными повторами.
+
+        Полные тела ответов, токены и заголовки авторизации не выводятся.
+        """
         url = f"{BASE_URL}{path}"
 
         for attempt in range(self.retries + 1):
@@ -158,7 +163,7 @@ class MySkladClient:
             if response.status_code in (401, 403):
                 raise MySkladApiError(
                     "МойСклад отказал в доступе. Проверьте токен "
-                    "и права просмотра складов, отгрузок и остатков.",
+                    "и права чтения заказов, отгрузок и остатков.",
                     status=response.status_code,
                 )
 
@@ -209,7 +214,7 @@ class MySkladClient:
         params: dict[str, object] | None = None,
     ) -> list[dict]:
         """
-        Получает все строки стандартной пагинации `limit` / `offset`.
+        Получает все строки через стандартную пагинацию limit / offset.
 
         Максимальный размер одной страницы МоегоСклада — 1000 строк.
         """
@@ -252,8 +257,24 @@ class MySkladClient:
         return result
 
     @staticmethod
+    def _validate_uuid(
+        value: str,
+        entity_name: str,
+    ) -> str:
+        """Проверяет UUID сущности, полученный из ответа API."""
+        clean_value = value.strip()
+
+        if not UUID_PATTERN.fullmatch(clean_value):
+            raise MySkladApiError(
+                "МойСклад вернул "
+                f"{entity_name} без корректного UUID."
+            )
+
+        return clean_value
+
+    @staticmethod
     def _validate_store_id(store_id: str) -> str:
-        """Проверяет формат UUID склада из Streamlit Secrets."""
+        """Проверяет UUID склада из Streamlit Secrets."""
         clean_store_id = store_id.strip()
 
         if not UUID_PATTERN.fullmatch(clean_store_id):
@@ -264,18 +285,6 @@ class MySkladClient:
             )
 
         return clean_store_id
-
-    @staticmethod
-    def _validate_demand_id(demand_id: str) -> str:
-        """Проверяет UUID отгрузки, полученный из ответа API."""
-        clean_demand_id = demand_id.strip()
-
-        if not UUID_PATTERN.fullmatch(clean_demand_id):
-            raise MySkladApiError(
-                "МойСклад вернул отгрузку без корректного UUID."
-            )
-
-        return clean_demand_id
 
     def store_name(
         self,
@@ -299,22 +308,9 @@ class MySkladClient:
         """
         Возвращает физические остатки по артикулам выбранного склада.
 
-        Используется расширенный отчёт МоегоСклада:
+        Используется:
 
-        `GET /report/stock/all`
-
-        В отличие от `/report/stock/bystore`, этот отчёт содержит
-        артикул товара в поле `article`. Это необходимо для точного
-        сопоставления с артикулом WB.
-
-        В расчёт входят:
-
-        - `article`;
-        - `stock`.
-
-        Поля `reserve`, `quantity`, `inTransit` намеренно не
-        используются, поскольку FBO и FBS пока не разделены
-        на независимые контуры.
+        GET /report/stock/all
         """
         clean_store_id = self._validate_store_id(store_id)
 
@@ -358,17 +354,13 @@ class MySkladClient:
 
     def demand_states(self) -> list[dict]:
         """
-        Получает статусы отгрузок из метаданных документа.
+        Получает статусы отгрузок.
 
-        Используется корректный read-only endpoint:
+        Endpoint:
 
-        `GET /entity/demand/metadata`
+        GET /entity/demand/metadata
 
-        Статусы находятся в поле `states` ответа метаданных.
-
-        Endpoint `/entity/demand/metadata/states` не используется для
-        чтения списка, потому что коллекция статусов не поддерживает
-        GET и при таком запросе API возвращает HTTP 405.
+        Статусы содержатся в поле `states`.
         """
         metadata = self._request(
             path="/entity/demand/metadata",
@@ -388,26 +380,45 @@ class MySkladClient:
             if isinstance(state, dict)
         ]
 
+    def customer_order_states(self) -> list[dict]:
+        """
+        Получает статусы заказов покупателей.
+
+        Endpoint:
+
+        GET /entity/customerorder/metadata
+
+        Статусы содержатся в поле `states`.
+        """
+        metadata = self._request(
+            path="/entity/customerorder/metadata",
+        )
+
+        states = metadata.get("states")
+
+        if not isinstance(states, list):
+            raise MySkladApiError(
+                "МойСклад вернул метаданные заказов покупателей "
+                "без списка статусов `states`."
+            )
+
+        return [
+            state
+            for state in states
+            if isinstance(state, dict)
+        ]
+
     def demands_by_moment(
         self,
         date_from: date,
         date_to: date,
     ) -> list[dict]:
         """
-        Возвращает отгрузки с датой документа `moment` в периоде.
+        Возвращает отгрузки с `moment` в выбранном периоде.
 
         Используется:
 
-        `GET /entity/demand`
-
-        Границы периода включительны:
-
-        - дата начала в `00:00:00`;
-        - дата окончания в `23:59:59`.
-
-        Фильтруется именно дата документа `moment`, а не `created` или
-        `updated`. Это позволяет анализировать фактический период,
-        выбранный пользователем для отчёта по отгрузкам.
+        GET /entity/demand
         """
         if date_from > date_to:
             raise ValueError(
@@ -431,25 +442,164 @@ class MySkladClient:
                     f"moment>={moment_from};"
                     f"moment<={moment_to}"
                 ),
+                "expand": "agent",
             },
+        )
+
+    def customer_orders_by_moment(
+        self,
+        date_from: date,
+        date_to: date,
+    ) -> list[dict]:
+        """
+        Возвращает заказы покупателей с `moment` в выбранном периоде.
+
+        Используется:
+
+        GET /entity/customerorder
+
+        Запрашивается `expand=agent`, чтобы в фильтре можно было
+        безопасно показать контрагента без дополнительного обращения
+        к карточке контрагента.
+        """
+        if date_from > date_to:
+            raise ValueError(
+                "Дата начала периода не может быть позже даты окончания."
+            )
+
+        moment_from = datetime.combine(
+            date_from,
+            datetime_time.min,
+        ).strftime("%Y-%m-%d %H:%M:%S")
+
+        moment_to = datetime.combine(
+            date_to,
+            datetime_time.max.replace(microsecond=0),
+        ).strftime("%Y-%m-%d %H:%M:%S")
+
+        return self._list_rows(
+            path="/entity/customerorder",
+            params={
+                "filter": (
+                    f"moment>={moment_from};"
+                    f"moment<={moment_to}"
+                ),
+                "expand": "agent",
+            },
+        )
+
+    def customer_order_by_id(
+        self,
+        customer_order_id: str,
+    ) -> dict:
+        """
+        Получает заказ покупателя с актуальными связанными отгрузками.
+
+        Используется:
+
+        GET /entity/customerorder/{id}
+
+        Поле `demands` — источник связанных отгрузок заказа.
+        """
+        clean_id = self._validate_uuid(
+            value=customer_order_id,
+            entity_name="заказ покупателя",
+        )
+
+        return self._request(
+            path=f"/entity/customerorder/{clean_id}",
+            params={
+                "expand": "agent,demands",
+            },
+        )
+
+    def demand_by_id(
+        self,
+        demand_id: str,
+    ) -> dict:
+        """
+        Получает отгрузку для проверки обратной связи с заказом.
+
+        Используется:
+
+        GET /entity/demand/{id}
+
+        Проверяются поля:
+
+        - `customerOrder`;
+        - `agent`;
+        - `state`.
+        """
+        clean_id = self._validate_uuid(
+            value=demand_id,
+            entity_name="отгрузку",
+        )
+
+        return self._request(
+            path=f"/entity/demand/{clean_id}",
+            params={
+                "expand": "agent,customerOrder",
+            },
+        )
+
+    def customer_order_positions(
+        self,
+        customer_order_id: str,
+        expand_assortment: bool = False,
+    ) -> list[dict]:
+        """
+        Получает все позиции заказа покупателя.
+
+        Используется:
+
+        GET /entity/customerorder/{id}/positions
+
+        При `expand_assortment=True` дополнительно запрашивается
+        артикул из карточки товара для сверки.
+        """
+        clean_id = self._validate_uuid(
+            value=customer_order_id,
+            entity_name="заказ покупателя",
+        )
+
+        params: dict[str, object] = {}
+
+        if expand_assortment:
+            params["expand"] = "assortment"
+
+        return self._list_rows(
+            path=(
+                f"/entity/customerorder/{clean_id}/positions"
+            ),
+            params=params,
         )
 
     def demand_positions(
         self,
         demand_id: str,
+        expand_assortment: bool = False,
     ) -> list[dict]:
         """
-        Получает все позиции конкретной отгрузки.
+        Получает все позиции отгрузки.
 
         Используется:
 
-        `GET /entity/demand/{id}/positions`
+        GET /entity/demand/{id}/positions
 
-        Обрабатывается отдельная пагинация `limit` / `offset`, потому
-        что в одной отгрузке может быть больше 1000 товарных строк.
+        При `expand_assortment=True` дополнительно запрашивается
+        артикул товара.
         """
-        clean_demand_id = self._validate_demand_id(demand_id)
+        clean_id = self._validate_uuid(
+            value=demand_id,
+            entity_name="отгрузку",
+        )
+
+        params: dict[str, object] = {}
+
+        if expand_assortment:
+            params["expand"] = "assortment"
 
         return self._list_rows(
-            path=f"/entity/demand/{clean_demand_id}/positions",
+            path=f"/entity/demand/{clean_id}/positions",
+            params=params,
         )
