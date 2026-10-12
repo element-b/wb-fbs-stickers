@@ -64,7 +64,7 @@ class MySkladClient:
 
     - карточка склада;
     - отчёт «Остатки по складам»;
-    - статусы отгрузок;
+    - метаданные и статусы отгрузок;
     - список отгрузок;
     - товарные позиции отгрузок.
 
@@ -209,7 +209,7 @@ class MySkladClient:
         params: dict[str, object] | None = None,
     ) -> list[dict]:
         """
-        Получает все строки стандартной пагинации limit/offset.
+        Получает все строки стандартной пагинации `limit` / `offset`.
 
         Максимальный размер одной страницы МоегоСклада — 1000 строк.
         """
@@ -301,7 +301,7 @@ class MySkladClient:
 
         Используется расширенный отчёт МоегоСклада:
 
-        GET /report/stock/all
+        `GET /report/stock/all`
 
         В отличие от `/report/stock/bystore`, этот отчёт содержит
         артикул товара в поле `article`. Это необходимо для точного
@@ -358,18 +358,35 @@ class MySkladClient:
 
     def demand_states(self) -> list[dict]:
         """
-        Получает все пользовательские статусы отгрузок.
+        Получает статусы отгрузок из метаданных документа.
 
-        Метод:
+        Используется корректный read-only endpoint:
 
-        GET /entity/demand/metadata/states
+        `GET /entity/demand/metadata`
 
-        Используется только для сопоставления ID статуса с его названием
-        в отчёте по отгрузкам. Никакие статусы не изменяются.
+        Статусы находятся в поле `states` ответа метаданных.
+
+        Endpoint `/entity/demand/metadata/states` не используется для
+        чтения списка, потому что коллекция статусов не поддерживает
+        GET и при таком запросе API возвращает HTTP 405.
         """
-        return self._list_rows(
-            path="/entity/demand/metadata/states",
+        metadata = self._request(
+            path="/entity/demand/metadata",
         )
+
+        states = metadata.get("states")
+
+        if not isinstance(states, list):
+            raise MySkladApiError(
+                "МойСклад вернул метаданные отгрузок без списка "
+                "статусов `states`."
+            )
+
+        return [
+            state
+            for state in states
+            if isinstance(state, dict)
+        ]
 
     def demands_by_moment(
         self,
@@ -381,7 +398,7 @@ class MySkladClient:
 
         Используется:
 
-        GET /entity/demand
+        `GET /entity/demand`
 
         Границы периода включительны:
 
@@ -424,9 +441,9 @@ class MySkladClient:
         """
         Получает все позиции конкретной отгрузки.
 
-        Метод:
+        Используется:
 
-        GET /entity/demand/{id}/positions
+        `GET /entity/demand/{id}/positions`
 
         Обрабатывается отдельная пагинация `limit` / `offset`, потому
         что в одной отгрузке может быть больше 1000 товарных строк.
