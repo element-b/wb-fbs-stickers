@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import re
 import time
+from datetime import date, datetime, time as datetime_time
 
 import requests
 
@@ -57,15 +58,17 @@ def _to_piece_count(value: float) -> int:
 
 class MySkladClient:
     """
-    Клиент JSON API МоегоСклада 1.2.
+    Read-only клиент JSON API МоегоСклада 1.2.
 
-    На первом этапе выполняет только GET-запросы:
+    Выполняет только GET-запросы:
 
     - карточка склада;
-    - отчёт «Остатки по складам».
+    - отчёт «Остатки по складам»;
+    - статусы отгрузок;
+    - список отгрузок;
+    - товарные позиции отгрузок.
 
-    Для планирования используется только физический остаток `stock`.
-    Поля `reserve` и `quantity` не используются.
+    Клиент не создаёт, не изменяет, не проводит и не удаляет документы.
     """
 
     def __init__(
@@ -155,7 +158,7 @@ class MySkladClient:
             if response.status_code in (401, 403):
                 raise MySkladApiError(
                     "МойСклад отказал в доступе. Проверьте токен "
-                    "и права просмотра складов и остатков.",
+                    "и права просмотра складов, отгрузок и остатков.",
                     status=response.status_code,
                 )
 
@@ -263,17 +266,16 @@ class MySkladClient:
         return clean_store_id
 
     @staticmethod
-    def _store_matches(
-        meta: object,
-        store_id: str,
-    ) -> bool:
-        """Проверяет, относится ли остаток к выбранному складу."""
-        if not isinstance(meta, dict):
-            return False
+    def _validate_demand_id(demand_id: str) -> str:
+        """Проверяет UUID отгрузки, полученный из ответа API."""
+        clean_demand_id = demand_id.strip()
 
-        href = str(meta.get("href") or "").rstrip("/")
+        if not UUID_PATTERN.fullmatch(clean_demand_id):
+            raise MySkladApiError(
+                "МойСклад вернул отгрузку без корректного UUID."
+            )
 
-        return href.endswith(f"/{store_id}")
+        return clean_demand_id
 
     def store_name(
         self,
@@ -336,7 +338,6 @@ class MySkladClient:
                 row.get("article") or ""
             ).strip()
 
-            # Без артикула остаток нельзя сопоставить с WB.
             if not article:
                 continue
 
@@ -354,3 +355,84 @@ class MySkladClient:
             article: _to_piece_count(quantity)
             for article, quantity in stock_by_article.items()
         }
+
+    def demand_states(self) -> list[dict]:
+        """
+        Получает все пользовательские статусы отгрузок.
+
+        Метод:
+
+        GET /entity/demand/metadata/states
+
+        Используется только для сопоставления ID статуса с его названием
+        в отчёте по отгрузкам. Никакие статусы не изменяются.
+        """
+        return self._list_rows(
+            path="/entity/demand/metadata/states",
+        )
+
+    def demands_by_moment(
+        self,
+        date_from: date,
+        date_to: date,
+    ) -> list[dict]:
+        """
+        Возвращает отгрузки с датой документа `moment` в периоде.
+
+        Используется:
+
+        GET /entity/demand
+
+        Границы периода включительны:
+
+        - дата начала в `00:00:00`;
+        - дата окончания в `23:59:59`.
+
+        Фильтруется именно дата документа `moment`, а не `created` или
+        `updated`. Это позволяет анализировать фактический период,
+        выбранный пользователем для отчёта по отгрузкам.
+        """
+        if date_from > date_to:
+            raise ValueError(
+                "Дата начала периода не может быть позже даты окончания."
+            )
+
+        moment_from = datetime.combine(
+            date_from,
+            datetime_time.min,
+        ).strftime("%Y-%m-%d %H:%M:%S")
+
+        moment_to = datetime.combine(
+            date_to,
+            datetime_time.max.replace(microsecond=0),
+        ).strftime("%Y-%m-%d %H:%M:%S")
+
+        return self._list_rows(
+            path="/entity/demand",
+            params={
+                "filter": (
+                    f"moment>={moment_from};"
+                    f"moment<={moment_to}"
+                ),
+            },
+        )
+
+    def demand_positions(
+        self,
+        demand_id: str,
+    ) -> list[dict]:
+        """
+        Получает все позиции конкретной отгрузки.
+
+        Метод:
+
+        GET /entity/demand/{id}/positions
+
+        Обрабатывается отдельная пагинация `limit` / `offset`, потому
+        что в одной отгрузке может быть больше 1000 товарных строк.
+        """
+        clean_demand_id = self._validate_demand_id(demand_id)
+
+        return self._list_rows(
+            path=f"/entity/demand/{clean_demand_id}/positions",
+        )

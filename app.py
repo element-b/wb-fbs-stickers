@@ -10,6 +10,7 @@ import streamlit as st
 
 from mysklad_api import MySkladApiError, MySkladClient
 from mysklad_export import make_mysklad_xlsx
+from mysklad_shipment_report import render_mysklad_shipments_tab
 from ozon_api import (
     COMPLETED_FBS_STATUSES,
     OzonApiError,
@@ -296,6 +297,7 @@ def init_session_state() -> None:
         "shipment_status_supplies": None,
         "shipment_status_result": None,
         "shipment_status_supply_widget_version": 0,
+        "mysklad_shipment_report_result": None,
     }
 
     for key, value in defaults.items():
@@ -1911,7 +1913,7 @@ def render_sidebar() -> None:
     with st.sidebar:
         st.markdown("## 📦 FBS")
         st.caption(
-            "Стикеры, планирование и контроль отгрузок WB FBS"
+            "Стикеры, планирование и контроль отгрузок FBS"
         )
 
         st.divider()
@@ -1924,6 +1926,8 @@ def render_sidebar() -> None:
               физического остатка готовой продукции.
             - **Статус отгрузок WB по кластерам** — read-only контроль
               статусов заданий завершённых WB-поставок.
+            - **Отгрузки МоегоСклада** — аудит количества товара во
+              всех отгрузках за период с разбивкой по статусам.
             """
         )
 
@@ -1976,11 +1980,17 @@ def main() -> None:
 
     render_sidebar()
 
-    stickers_tab, planning_tab, shipment_status_tab = st.tabs(
+    (
+        stickers_tab,
+        planning_tab,
+        shipment_status_tab,
+        mysklad_shipments_tab,
+    ) = st.tabs(
         [
             "📦 Стикеры WB FBS",
             "⚡ Краткосрочный план FBS",
             "🚚 Статус отгрузок WB по кластерам",
+            "📊 Отгрузки МоегоСклада",
         ]
     )
 
@@ -1992,6 +2002,9 @@ def main() -> None:
 
     with shipment_status_tab:
         render_wb_shipment_status_tab(wb_client)
+
+    with mysklad_shipments_tab:
+        render_mysklad_shipments_tab()
 
 
 if __name__ == "__main__":
