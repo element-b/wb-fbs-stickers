@@ -490,7 +490,7 @@ def _telegram_text(
         order_problems = sorted(
             problems_by_order.get(order_number, []),
             key=lambda row: (
-                0 if row["Результат"] == "Недобор" else 1,
+                0 if row["Отклонение"] < 0 else 1,
                 -abs(row["Отклонение"]),
                 row["Артикул"].casefold(),
                 row["Артикул"],
@@ -501,23 +501,29 @@ def _telegram_text(
             lines.append("Отклонения по товарам:")
 
             for row in order_problems:
-                if row["Отклонение"] < 0:
+                ordered_quantity = row["Заказано"]
+                shipped_quantity = row[
+                    "В связанных отгрузках"
+                ]
+                deviation = row["Отклонение"]
+
+                if deviation < 0:
                     lines.append(
                         "• "
                         f"{row['Артикул']} — "
-                        f"заказано {row['Заказано']}, "
+                        f"заказано {ordered_quantity}, "
                         f"в связанных отгрузках "
-                        f"{row['Отгружено']}, "
-                        f"недобор {abs(row['Отклонение'])}."
+                        f"{shipped_quantity}, "
+                        f"недобор {abs(deviation)}."
                     )
                 else:
                     lines.append(
                         "• "
                         f"{row['Артикул']} — "
-                        f"заказано {row['Заказано']}, "
+                        f"заказано {ordered_quantity}, "
                         f"в связанных отгрузках "
-                        f"{row['Отгружено']}, "
-                        f"перебор {row['Отклонение']}."
+                        f"{shipped_quantity}, "
+                        f"перебор {deviation}."
                     )
 
     return "\n".join(lines)
