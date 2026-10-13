@@ -34,12 +34,12 @@ class MySkladApiError(RuntimeError):
 
 
 def _as_number(value: object) -> float:
-    """Преобразует количество API МоегоСклада в число."""
+    """Преобразует значение API МоегоСклада в число."""
     try:
         return float(value)
     except (TypeError, ValueError) as error:
         raise MySkladApiError(
-            "МойСклад вернул некорректное числовое значение остатка."
+            "МойСклад вернул некорректное числовое значение."
         ) from error
 
 
@@ -60,14 +60,13 @@ class MySkladClient:
     """
     Read-only клиент JSON API МоегоСклада 1.2.
 
-    Выполняет только GET-запросы:
+    Использует только GET-запросы:
 
-    - карточка склада;
-    - отчёт остатков;
-    - статусы заказов и отгрузок;
+    - склады и остатки;
+    - метаданные статусов;
     - заказы покупателей;
     - отгрузки;
-    - товарные позиции заказов и отгрузок.
+    - позиции заказов и отгрузок.
 
     Клиент не создаёт, не изменяет, не проводит и не удаляет документы.
     """
@@ -78,7 +77,9 @@ class MySkladClient:
         timeout: int = 60,
         retries: int = 3,
     ) -> None:
-        if not token.strip():
+        clean_token = token.strip()
+
+        if not clean_token:
             raise ValueError(
                 "Не задан `MYSKLAD_API_TOKEN`."
             )
@@ -90,7 +91,7 @@ class MySkladClient:
         self.session = requests.Session()
         self.session.headers.update(
             {
-                "Authorization": f"Bearer {token.strip()}",
+                "Authorization": f"Bearer {clean_token}",
                 "Accept": "application/json;charset=utf-8",
                 "Accept-Encoding": "gzip",
             }
@@ -109,7 +110,7 @@ class MySkladClient:
         response: requests.Response,
         attempt: int,
     ) -> float:
-        """Определяет задержку перед повторным запросом."""
+        """Определяет задержку перед повтором запроса."""
         retry_after = (
             response.headers.get("X-Lognex-Retry-After")
             or response.headers.get("Retry-After")
@@ -132,9 +133,10 @@ class MySkladClient:
         params: dict[str, object] | None = None,
     ) -> dict:
         """
-        Выполняет GET-запрос к МоемСкладу с ограниченными повторами.
+        Выполняет GET-запрос с безопасными ограниченными повторами.
 
-        Полные тела ответов, токены и заголовки авторизации не выводятся.
+        Тело ответа, токен и заголовки авторизации не логируются
+        и не выводятся пользователю.
         """
         url = f"{BASE_URL}{path}"
 
@@ -163,7 +165,7 @@ class MySkladClient:
             if response.status_code in (401, 403):
                 raise MySkladApiError(
                     "МойСклад отказал в доступе. Проверьте токен "
-                    "и права чтения заказов, отгрузок и остатков.",
+                    "и права просмотра заказов, отгрузок и остатков.",
                     status=response.status_code,
                 )
 
@@ -212,21 +214,40 @@ class MySkladClient:
         self,
         path: str,
         params: dict[str, object] | None = None,
+        page_limit: int | None = None,
     ) -> list[dict]:
         """
-        Получает все строки через стандартную пагинацию limit / offset.
+        Получает все строки через пагинацию `limit` / `offset`.
 
-        Максимальный размер одной страницы МоегоСклада — 1000 строк.
+        Для обычных запросов используется до 1000 строк на страницу.
+
+        Для запросов с `expand` используется максимум 100 строк:
+        документация МоегоСклада ограничивает размер страницы
+        при разворачивании связанных сущностей. Это важно для позиций
+        заказов и отгрузок с `expand=assortment`, где нужен article.
         """
+        query_template = dict(params or {})
+
+        if page_limit is None:
+            has_expand = bool(
+                str(query_template.get("expand") or "").strip()
+            )
+
+            page_limit = 100 if has_expand else 1000
+
+        if not 1 <= page_limit <= 1000:
+            raise ValueError(
+                "Размер страницы МоегоСклада должен быть от 1 до 1000."
+            )
+
         result: list[dict] = []
         offset = 0
-        limit = 1000
 
         while True:
-            query = dict(params or {})
+            query = dict(query_template)
             query.update(
                 {
-                    "limit": limit,
+                    "limit": page_limit,
                     "offset": offset,
                 }
             )
@@ -249,10 +270,10 @@ class MySkladClient:
                 if isinstance(row, dict)
             )
 
-            if len(rows) < limit:
+            if len(rows) < page_limit:
                 break
 
-            offset += limit
+            offset += page_limit
 
         return result
 
@@ -261,7 +282,7 @@ class MySkladClient:
         value: str,
         entity_name: str,
     ) -> str:
-        """Проверяет UUID сущности, полученный из ответа API."""
+        """Проверяет UUID сущности, полученный из API."""
         clean_value = value.strip()
 
         if not UUID_PATTERN.fullmatch(clean_value):
@@ -308,7 +329,7 @@ class MySkladClient:
         """
         Возвращает физические остатки по артикулам выбранного склада.
 
-        Используется:
+        Используется read-only отчёт:
 
         GET /report/stock/all
         """
@@ -354,13 +375,11 @@ class MySkladClient:
 
     def demand_states(self) -> list[dict]:
         """
-        Получает статусы отгрузок.
+        Возвращает статусы документа «Отгрузка».
 
         Endpoint:
 
         GET /entity/demand/metadata
-
-        Статусы содержатся в поле `states`.
         """
         metadata = self._request(
             path="/entity/demand/metadata",
@@ -370,8 +389,7 @@ class MySkladClient:
 
         if not isinstance(states, list):
             raise MySkladApiError(
-                "МойСклад вернул метаданные отгрузок без списка "
-                "статусов `states`."
+                "МойСклад вернул метаданные отгрузок без поля `states`."
             )
 
         return [
@@ -382,13 +400,11 @@ class MySkladClient:
 
     def customer_order_states(self) -> list[dict]:
         """
-        Получает статусы заказов покупателей.
+        Возвращает статусы документа «Заказ покупателя».
 
         Endpoint:
 
         GET /entity/customerorder/metadata
-
-        Статусы содержатся в поле `states`.
         """
         metadata = self._request(
             path="/entity/customerorder/metadata",
@@ -399,7 +415,7 @@ class MySkladClient:
         if not isinstance(states, list):
             raise MySkladApiError(
                 "МойСклад вернул метаданные заказов покупателей "
-                "без списка статусов `states`."
+                "без поля `states`."
             )
 
         return [
@@ -416,7 +432,7 @@ class MySkladClient:
         """
         Возвращает отгрузки с `moment` в выбранном периоде.
 
-        Используется:
+        Endpoint:
 
         GET /entity/demand
         """
@@ -454,13 +470,9 @@ class MySkladClient:
         """
         Возвращает заказы покупателей с `moment` в выбранном периоде.
 
-        Используется:
+        Endpoint:
 
         GET /entity/customerorder
-
-        Запрашивается `expand=agent`, чтобы в фильтре можно было
-        безопасно показать контрагента без дополнительного обращения
-        к карточке контрагента.
         """
         if date_from > date_to:
             raise ValueError(
@@ -493,13 +505,14 @@ class MySkladClient:
         customer_order_id: str,
     ) -> dict:
         """
-        Получает заказ покупателя с актуальными связанными отгрузками.
+        Получает заказ покупателя и его связанные отгрузки.
 
-        Используется:
+        Endpoint:
 
         GET /entity/customerorder/{id}
 
-        Поле `demands` — источник связанных отгрузок заказа.
+        Поле `demands` является источником связанных отгрузок
+        для диагностической сверки.
         """
         clean_id = self._validate_uuid(
             value=customer_order_id,
@@ -509,7 +522,7 @@ class MySkladClient:
         return self._request(
             path=f"/entity/customerorder/{clean_id}",
             params={
-                "expand": "agent,demands",
+                "expand": "demands",
             },
         )
 
@@ -518,17 +531,11 @@ class MySkladClient:
         demand_id: str,
     ) -> dict:
         """
-        Получает отгрузку для проверки обратной связи с заказом.
+        Получает отгрузку для диагностики связи с заказом.
 
-        Используется:
+        Endpoint:
 
         GET /entity/demand/{id}
-
-        Проверяются поля:
-
-        - `customerOrder`;
-        - `agent`;
-        - `state`.
         """
         clean_id = self._validate_uuid(
             value=demand_id,
@@ -538,7 +545,7 @@ class MySkladClient:
         return self._request(
             path=f"/entity/demand/{clean_id}",
             params={
-                "expand": "agent,customerOrder",
+                "expand": "customerOrder",
             },
         )
 
@@ -548,14 +555,13 @@ class MySkladClient:
         expand_assortment: bool = False,
     ) -> list[dict]:
         """
-        Получает все позиции заказа покупателя.
+        Получает позиции заказа покупателя.
 
-        Используется:
+        При `expand_assortment=True` в каждой позиции нужен объект
+        номенклатуры с `article`.
 
-        GET /entity/customerorder/{id}/positions
-
-        При `expand_assortment=True` дополнительно запрашивается
-        артикул из карточки товара для сверки.
+        Для запроса автоматически используется лимит 100, потому что
+        применяется `expand=assortment`.
         """
         clean_id = self._validate_uuid(
             value=customer_order_id,
@@ -580,14 +586,13 @@ class MySkladClient:
         expand_assortment: bool = False,
     ) -> list[dict]:
         """
-        Получает все позиции отгрузки.
+        Получает позиции отгрузки.
 
-        Используется:
+        При `expand_assortment=True` в каждой позиции нужен объект
+        номенклатуры с `article`.
 
-        GET /entity/demand/{id}/positions
-
-        При `expand_assortment=True` дополнительно запрашивается
-        артикул товара.
+        Для запроса автоматически используется лимит 100, потому что
+        применяется `expand=assortment`.
         """
         clean_id = self._validate_uuid(
             value=demand_id,
