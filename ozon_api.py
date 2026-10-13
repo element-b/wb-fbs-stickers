@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import time
 from dataclasses import dataclass
 from datetime import (
@@ -18,28 +20,24 @@ BASE_URL = "https://api-seller.ozon.ru"
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
-# Консервативный последовательный режим для ручного запуска из Streamlit.
 MIN_REQUEST_INTERVAL_SECONDS = 0.25
 
-# Небольшой размер страницы снижает риск проблем валидации и позволяет
-# корректно пройти cursor-пагинацию.
 PAGE_SIZE = 100
 
-# Статусы, согласованные для производственного контура.
-#
-# Важно:
-# `sent_by_seller` не разрешён Ozon в filter.statuses для
-# /v4/posting/fbs/list, поэтому эти статусы НЕ передаются в API-запросе.
-# Они проверяются только локально после получения FBS-posting.
+# Статусы, используемые существующей вкладкой краткосрочного плана.
 COMPLETED_FBS_STATUSES = (
     "delivering",
     "sent_by_seller",
 )
 
-# Период получения списка posting расширяется назад относительно
-# целевых семи дней. Posting мог быть создан раньше, но передан
-# в доставку в нужный день.
+# Posting может быть создан до целевого периода передачи в доставку.
 DEFAULT_QUERY_LOOKBACK_DAYS = 31
+
+# Прямой endpoint печати этикеток Ozon допускает не более 20 отправлений.
+PACKAGE_LABEL_BATCH_SIZE = 20
+
+# Рабочий статус для печати этикеток после ручного нажатия «Собрать».
+AWAITING_DELIVER_STATUS = "awaiting_deliver"
 
 
 class OzonApiError(RuntimeError):
@@ -63,14 +61,41 @@ class OzonFbsDemandResult:
     skipped_non_matching_offer_ids: list[str]
 
 
+@dataclass(frozen=True)
+class OzonFbsStickerPosting:
+    """
+    Безопасные данные FBS-отправления для вкладки печати этикеток.
+
+    Не содержит данных покупателей, адресов, телефонов, финансовой
+    информации и полного ответа API.
+    """
+
+    posting_number: str
+    in_process_at: datetime
+    offer_quantities: dict[str, int]
+
+    @property
+    def total_quantity(self) -> int:
+        """Возвращает сумму товаров NAKL_ в отправлении."""
+        return sum(self.offer_quantities.values())
+
+    @property
+    def offer_ids(self) -> list[str]:
+        """Возвращает отсортированный список артикулов NAKL_."""
+        return sorted(
+            self.offer_quantities,
+            key=lambda value: (value.casefold(), value),
+        )
+
+
 def _parse_ozon_datetime(
     value: object,
 ) -> datetime | None:
     """
     Преобразует ISO-дату Ozon в Europe/Moscow.
 
-    Значение без timezone намеренно не трактуется как UTC или Москва:
-    это могло бы ошибочно включить posting в неверный календарный день.
+    Значение без timezone не трактуется автоматически как UTC либо
+    Москва: иначе отправление может попасть в неверный календарный день.
     """
     if not isinstance(value, str) or not value.strip():
         return None
@@ -105,9 +130,9 @@ def _period_boundaries(
     date_to: date,
 ) -> tuple[datetime, datetime]:
     """
-    Возвращает границы московского календарного периода.
+    Возвращает границы московского периода.
 
-    Левая граница включительна, правая граница исключительна.
+    Левая граница включительна, правая — исключительна.
     """
     period_start = datetime.combine(
         date_from,
@@ -128,10 +153,10 @@ def _safe_ozon_error_hint(
     response: requests.Response,
 ) -> str:
     """
-    Возвращает короткое безопасное пояснение Ozon к HTTP-ошибке.
+    Возвращает короткое безопасное пояснение ошибки Ozon.
 
-    Не выводятся API-ключи, Client-Id, заголовки, полный JSON и данные
-    отправлений. Используются только типовые текстовые поля ошибки.
+    Не выводятся ключи API, заголовки, полный JSON, адреса и данные
+    покупателей. Используются только стандартные текстовые поля ошибки.
     """
     try:
         payload = response.json()
@@ -164,17 +189,13 @@ class OzonClient:
     """
     Read-only клиент Ozon Seller API.
 
-    Используемый endpoint:
+    Использует только запросы чтения и получения готовых этикеток:
 
-    POST /v4/posting/fbs/list
+    - POST /v4/posting/fbs/list;
+    - POST /v2/posting/fbs/package-label.
 
-    Клиент не создаёт, не изменяет, не подтверждает и не отменяет:
-    - FBS-posting;
-    - поставки;
-    - отгрузки;
-    - остатки;
-    - документы;
-    - задания.
+    Клиент не подтверждает сборку, не меняет статусы, не отменяет
+    отправления, не создаёт поставки и не редактирует документы.
     """
 
     def __init__(
@@ -210,7 +231,6 @@ class OzonClient:
     def _wait_for_rate_limit(self) -> None:
         """Выдерживает безопасный интервал между запросами."""
         elapsed = time.monotonic() - self._last_request_at
-
         delay = MIN_REQUEST_INTERVAL_SECONDS - elapsed
 
         if delay > 0:
@@ -235,20 +255,131 @@ class OzonClient:
 
         return min(float(2 ** attempt), 8.0)
 
+    @staticmethod
+    def _as_positive_quantity(
+        value: object,
+        posting_number: str,
+        offer_id: str,
+    ) -> int:
+        """Проверяет положительное целое количество товара."""
+        if isinstance(value, bool):
+            raise OzonApiError(
+                "Ozon вернул некорректное количество товара "
+                f"в FBS-отправлении `{posting_number}` "
+                f"для offer_id `{offer_id}`."
+            )
+
+        if isinstance(value, float) and not value.is_integer():
+            raise OzonApiError(
+                "Ozon вернул дробное количество товара "
+                f"в FBS-отправлении `{posting_number}` "
+                f"для offer_id `{offer_id}`."
+            )
+
+        try:
+            quantity = int(value)
+        except (TypeError, ValueError) as error:
+            raise OzonApiError(
+                "Ozon вернул некорректное количество товара "
+                f"в FBS-отправлении `{posting_number}` "
+                f"для offer_id `{offer_id}`."
+            ) from error
+
+        if quantity <= 0:
+            raise OzonApiError(
+                "Ozon вернул неположительное количество товара "
+                f"в FBS-отправлении `{posting_number}` "
+                f"для offer_id `{offer_id}`."
+            )
+
+        return quantity
+
+    @staticmethod
+    def _posting_is_test(
+        posting: dict,
+    ) -> bool:
+        """Исключает тестовые отправления при наличии флага."""
+        return bool(
+            posting.get("is_test")
+            or posting.get("is_test_order")
+        )
+
+    @staticmethod
+    def _posting_cancelled_after_ship(
+        posting: dict,
+    ) -> bool:
+        """Определяет отмену отправления после отгрузки."""
+        cancellation = posting.get("cancellation")
+
+        if not isinstance(cancellation, dict):
+            return False
+
+        return bool(
+            cancellation.get("cancelled_after_ship")
+        )
+
+    @staticmethod
+    def _posting_fingerprint(
+        posting: dict,
+    ) -> tuple[str, str, str, tuple[tuple[str, str], ...]]:
+        """
+        Формирует безопасный отпечаток отправления для проверки дублей.
+
+        Если один `posting_number` приходит с разными данными, расчёт
+        останавливается, чтобы не выбрать произвольную версию.
+        """
+        status = str(posting.get("status") or "").strip()
+
+        delivering_date = str(
+            posting.get("delivering_date") or ""
+        ).strip()
+
+        in_process_at = str(
+            posting.get("in_process_at") or ""
+        ).strip()
+
+        products = posting.get("products")
+
+        if not isinstance(products, list):
+            return (
+                status,
+                delivering_date,
+                in_process_at,
+                (("<invalid-products>", ""),),
+            )
+
+        normalized_products: list[tuple[str, str]] = []
+
+        for product in products:
+            if not isinstance(product, dict):
+                normalized_products.append(
+                    ("<invalid-product>", "")
+                )
+                continue
+
+            normalized_products.append(
+                (
+                    str(product.get("offer_id") or "").strip(),
+                    str(product.get("quantity") or "").strip(),
+                )
+            )
+
+        return (
+            status,
+            delivering_date,
+            in_process_at,
+            tuple(sorted(normalized_products)),
+        )
+
     def _request(
         self,
         path: str,
         payload: dict,
     ) -> dict:
         """
-        Выполняет POST-запрос с ограниченными повторами.
+        Выполняет POST-запрос, ожидающий JSON.
 
-        Повторы выполняются только для:
-        - сетевых ошибок;
-        - HTTP 429;
-        - HTTP 5xx.
-
-        Тело ответа, ключ и заголовки авторизации не выводятся.
+        Повторы выполняются только для сетевых ошибок, HTTP 429 и HTTP 5xx.
         """
         url = f"{BASE_URL}{path}"
 
@@ -261,7 +392,6 @@ class OzonClient:
                     json=payload,
                     timeout=self.timeout,
                 )
-
                 self._last_request_at = time.monotonic()
 
             except requests.RequestException:
@@ -284,7 +414,7 @@ class OzonClient:
             if response.status_code == 403:
                 raise OzonApiError(
                     "Ozon отказал в доступе. Проверьте права API-ключа "
-                    "на чтение FBS-отправлений.",
+                    "на чтение FBS-отправлений и этикеток.",
                     status=403,
                 )
 
@@ -292,7 +422,7 @@ class OzonClient:
                 if attempt >= self.retries:
                     raise OzonApiError(
                         "Ozon временно ограничил частоту запросов. "
-                        "Повторите обновление плана позже.",
+                        "Повторите операцию позже.",
                         status=429,
                     )
 
@@ -308,7 +438,7 @@ class OzonClient:
                 if attempt >= self.retries:
                     raise OzonApiError(
                         "Ozon Seller API временно недоступен. "
-                        "Повторите обновление плана позже.",
+                        "Повторите операцию позже.",
                         status=response.status_code,
                     )
 
@@ -354,125 +484,157 @@ class OzonClient:
             "Не удалось выполнить запрос к Ozon Seller API."
         )
 
-    @staticmethod
-    def _as_positive_quantity(
-        value: object,
-        posting_number: str,
-        offer_id: str,
-    ) -> int:
+    def _request_pdf(
+        self,
+        path: str,
+        payload: dict,
+    ) -> bytes:
         """
-        Проверяет, что quantity — положительное целое количество.
+        Получает PDF-этикетки Ozon.
 
-        Проверка вызывается только после фильтра NAKL_, поэтому проблема
-        с количеством у трусов, маек и других нецелевых товаров не
-        блокирует производственный расчёт наклеек.
+        Метод `POST /v2/posting/fbs/package-label` в разных версиях
+        контракта может вернуть:
+
+        - PDF непосредственно в теле ответа;
+        - JSON с base64-строкой в поле `content`.
+
+        Поддерживаются оба документируемых варианта. Полный ответ Ozon
+        и base64-содержимое не выводятся в интерфейс или логи.
         """
-        if isinstance(value, bool):
-            raise OzonApiError(
-                "Ozon вернул некорректное количество товара "
-                f"в отправлении `{posting_number}` "
-                f"для offer_id `{offer_id}`."
-            )
+        url = f"{BASE_URL}{path}"
 
-        if isinstance(value, float) and not value.is_integer():
-            raise OzonApiError(
-                "Ozon вернул дробное количество товара "
-                f"в отправлении `{posting_number}` "
-                f"для offer_id `{offer_id}`."
-            )
+        for attempt in range(self.retries + 1):
+            self._wait_for_rate_limit()
 
-        try:
-            quantity = int(value)
-        except (TypeError, ValueError) as error:
-            raise OzonApiError(
-                "Ozon вернул некорректное количество товара "
-                f"в отправлении `{posting_number}` "
-                f"для offer_id `{offer_id}`."
-            ) from error
+            try:
+                response = self.session.post(
+                    url=url,
+                    json=payload,
+                    timeout=self.timeout,
+                    headers={
+                        "Accept": "application/pdf, application/json",
+                    },
+                )
+                self._last_request_at = time.monotonic()
 
-        if quantity <= 0:
-            raise OzonApiError(
-                "Ozon вернул неположительное количество товара "
-                f"в отправлении `{posting_number}` "
-                f"для offer_id `{offer_id}`."
-            )
+            except requests.RequestException:
+                if attempt >= self.retries:
+                    raise OzonApiError(
+                        "Сетевая ошибка при получении QR-этикеток Ozon. "
+                        "Проверьте интернет-соединение и повторите позже."
+                    )
 
-        return quantity
+                time.sleep(min(float(2 ** attempt), 8.0))
+                continue
 
-    @staticmethod
-    def _posting_is_test(
-        posting: dict,
-    ) -> bool:
-        """
-        Исключает тестовые posting, если API возвращает технический флаг.
+            if response.status_code == 401:
+                raise OzonApiError(
+                    "Ozon отклонил авторизацию. Проверьте "
+                    "`OZON_CLIENT_ID` и `OZON_API_KEY` в Secrets.",
+                    status=401,
+                )
 
-        Если поле отсутствует, posting не считается тестовым автоматически.
-        """
-        return bool(
-            posting.get("is_test")
-            or posting.get("is_test_order")
-        )
+            if response.status_code == 403:
+                raise OzonApiError(
+                    "Ozon отказал в доступе к FBS-этикеткам. "
+                    "Проверьте права API-ключа.",
+                    status=403,
+                )
 
-    @staticmethod
-    def _posting_cancelled_after_ship(
-        posting: dict,
-    ) -> bool:
-        """Исключает posting, отменённые после отгрузки."""
-        cancellation = posting.get("cancellation")
+            if response.status_code == 429:
+                if attempt >= self.retries:
+                    raise OzonApiError(
+                        "Ozon временно ограничил частоту запросов "
+                        "этикеток. Повторите позже.",
+                        status=429,
+                    )
 
-        if not isinstance(cancellation, dict):
-            return False
-
-        return bool(
-            cancellation.get("cancelled_after_ship")
-        )
-
-    @staticmethod
-    def _posting_fingerprint(
-        posting: dict,
-    ) -> tuple[str, str, tuple[tuple[str, str], ...]]:
-        """
-        Формирует безопасный отпечаток posting для проверки дублей.
-
-        При повторе одного `posting_number` с разными данными расчёт
-        останавливается. Нельзя выбирать версию произвольно и рисковать
-        двойным учётом.
-        """
-        status = str(posting.get("status") or "").strip()
-
-        delivering_date = str(
-            posting.get("delivering_date") or ""
-        ).strip()
-
-        products = posting.get("products")
-
-        if not isinstance(products, list):
-            return (
-                status,
-                delivering_date,
-                (("<invalid-products>", ""),),
-            )
-
-        normalized_products: list[tuple[str, str]] = []
-
-        for product in products:
-            if not isinstance(product, dict):
-                normalized_products.append(
-                    ("<invalid-product>", "")
+                time.sleep(
+                    self._retry_delay(
+                        response=response,
+                        attempt=attempt,
+                    )
                 )
                 continue
 
-            normalized_products.append(
-                (
-                    str(product.get("offer_id") or "").strip(),
-                    str(product.get("quantity") or "").strip(),
-                )
-            )
+            if response.status_code >= 500:
+                if attempt >= self.retries:
+                    raise OzonApiError(
+                        "Ozon Seller API временно недоступен при "
+                        "получении этикеток. Повторите позже.",
+                        status=response.status_code,
+                    )
 
-        return (
-            status,
-            delivering_date,
-            tuple(sorted(normalized_products)),
+                time.sleep(
+                    self._retry_delay(
+                        response=response,
+                        attempt=attempt,
+                    )
+                )
+                continue
+
+            if not response.ok:
+                hint = _safe_ozon_error_hint(response)
+
+                message = (
+                    "Ozon не подготовил QR-этикетки: "
+                    f"HTTP {response.status_code}."
+                )
+
+                if hint:
+                    message += f" Пояснение Ozon: {hint}"
+
+                raise OzonApiError(
+                    message,
+                    status=response.status_code,
+                )
+
+            raw_pdf = bytes(response.content or b"")
+
+            if raw_pdf.startswith(b"%PDF-"):
+                return raw_pdf
+
+            try:
+                payload_data = response.json()
+            except ValueError as error:
+                raise OzonApiError(
+                    "Ozon вернул этикетки в неизвестном формате."
+                ) from error
+
+            if not isinstance(payload_data, dict):
+                raise OzonApiError(
+                    "Ozon вернул этикетки в неожиданном формате."
+                )
+
+            encoded_pdf = payload_data.get("content")
+
+            if not isinstance(encoded_pdf, str) or not encoded_pdf:
+                raise OzonApiError(
+                    "Ozon не вернул PDF-содержимое QR-этикеток. "
+                    "Возможно, этикетки ещё не готовы. Повторите "
+                    "запрос через 45–60 секунд."
+                )
+
+            try:
+                decoded_pdf = base64.b64decode(
+                    encoded_pdf,
+                    validate=True,
+                )
+            except (ValueError, binascii.Error) as error:
+                raise OzonApiError(
+                    "Ozon вернул повреждённое содержимое "
+                    "QR-этикеток."
+                ) from error
+
+            if not decoded_pdf.startswith(b"%PDF-"):
+                raise OzonApiError(
+                    "Ozon вернул этикетки не в формате PDF."
+                )
+
+            return decoded_pdf
+
+        raise OzonApiError(
+            "Не удалось получить QR-этикетки Ozon."
         )
 
     def _list_postings_page(
@@ -481,15 +643,7 @@ class OzonClient:
         since: datetime,
         to: datetime,
     ) -> tuple[list[dict], bool, str]:
-        """
-        Получает одну страницу FBS-posting.
-
-        Важно: `filter.statuses` здесь намеренно НЕ передаётся.
-
-        Ozon не принимает `sent_by_seller` как значение этого фильтра
-        для `/v4/posting/fbs/list`. Статусы фильтруются локально после
-        получения данных.
-        """
+        """Получает одну страницу FBS-отправлений Ozon."""
         payload = {
             "cursor": cursor,
             "filter": {
@@ -544,7 +698,7 @@ class OzonClient:
         since: datetime,
         to: datetime,
     ) -> list[dict]:
-        """Получает все страницы через cursor-пагинацию Ozon."""
+        """Получает все страницы FBS-отправлений через cursor."""
         all_postings: list[dict] = []
 
         cursor = ""
@@ -567,14 +721,14 @@ class OzonClient:
             if not next_cursor:
                 raise OzonApiError(
                     "Ozon сообщил о следующей странице, но не вернул "
-                    "cursor. План не обновлён, чтобы исключить "
-                    "неполный расчёт."
+                    "cursor. Расчёт остановлен, чтобы не использовать "
+                    "неполный список отправлений."
                 )
 
             if next_cursor in seen_cursors:
                 raise OzonApiError(
-                    "Ozon вернул повторяющийся cursor. План не обновлён, "
-                    "чтобы исключить неполный расчёт."
+                    "Ozon вернул повторяющийся cursor. Расчёт остановлен, "
+                    "чтобы не использовать неполный список отправлений."
                 )
 
             seen_cursors.add(next_cursor)
@@ -592,22 +746,7 @@ class OzonClient:
         """
         Возвращает фактическое Ozon FBS-потребление по offer_id.
 
-        В производственное потребление входят только posting:
-
-        - со статусом `delivering` или `sent_by_seller`;
-        - с заполненным `delivering_date`;
-        - у которых `delivering_date` входит в нужный московский период;
-        - не тестовые;
-        - не отменённые после отгрузки;
-        - содержащие товары с offer_id, начинающимся с точного
-          регистрозависимого префикса `NAKL_`.
-
-        `filter.since` и `filter.to` запрашивают расширенный период:
-        posting мог быть создан раньше, но фактически передан в доставку
-        внутри нужных семи дней.
-
-        Финальная проверка производственного периода выполняется только
-        по `delivering_date`.
+        Используется существующей вкладкой краткосрочного плана.
         """
         if date_from > date_to:
             raise ValueError(
@@ -644,7 +783,7 @@ class OzonClient:
         unique_postings: dict[str, dict] = {}
         fingerprints: dict[
             str,
-            tuple[str, str, tuple[tuple[str, str], ...]],
+            tuple[str, str, str, tuple[tuple[str, str], ...]],
         ] = {}
 
         for posting in postings:
@@ -682,9 +821,6 @@ class OzonClient:
         for posting_number, posting in unique_postings.items():
             status = str(posting.get("status") or "").strip()
 
-            # Локальная фильтрация согласованных статусов.
-            # Не используем filter.statuses в API-запросе, поскольку Ozon
-            # не принимает sent_by_seller в валидации данного endpoint.
             if status not in COMPLETED_FBS_STATUSES:
                 continue
 
@@ -702,8 +838,7 @@ class OzonClient:
                 raise OzonApiError(
                     "Ozon вернул FBS-отправление в статусе передачи "
                     "в доставку без корректного `delivering_date`: "
-                    f"`{posting_number}`. План не обновлён, чтобы "
-                    "не потерять фактическое потребление."
+                    f"`{posting_number}`."
                 )
 
             if not (
@@ -718,8 +853,7 @@ class OzonClient:
             if not isinstance(products, list) or not products:
                 raise OzonApiError(
                     "Ozon вернул FBS-отправление без списка товаров: "
-                    f"`{posting_number}`. План не обновлён, чтобы "
-                    "не потерять фактическое потребление."
+                    f"`{posting_number}`."
                 )
 
             posting_has_matching_product = False
@@ -735,18 +869,12 @@ class OzonClient:
                     product.get("offer_id") or ""
                 ).strip()
 
-                # Нельзя установить принадлежность к NAKL_, если offer_id
-                # отсутствует. Поэтому это блокирующая ошибка.
                 if not offer_id:
                     raise OzonApiError(
                         "Ozon вернул товар без `offer_id` "
-                        f"в FBS-отправлении `{posting_number}`. "
-                        "План не обновлён, чтобы не сформировать "
-                        "потенциально неполную очередь."
+                        f"в FBS-отправлении `{posting_number}`."
                     )
 
-                # Точное регистрозависимое сравнение.
-                # Изменены только внешние пробелы через strip().
                 if not offer_id.startswith(prefix):
                     skipped_non_matching_offer_ids.add(offer_id)
                     continue
@@ -775,3 +903,253 @@ class OzonClient:
                 key=lambda value: (value.casefold(), value),
             ),
         )
+
+    def awaiting_deliver_nakl_postings(
+        self,
+        date_from: date,
+        date_to: date,
+        offer_id_prefix: str = "NAKL_",
+        query_lookback_days: int = (
+            DEFAULT_QUERY_LOOKBACK_DAYS
+        ),
+    ) -> list[OzonFbsStickerPosting]:
+        """
+        Возвращает FBS-отправления, готовые к печати QR-этикеток.
+
+        Включаются только отправления:
+
+        - со статусом `awaiting_deliver`;
+        - не тестовые;
+        - не отменённые после отгрузки;
+        - с корректным `in_process_at` в выбранном московском периоде;
+        - содержащие хотя бы один товар, у которого offer_id начинается
+          с указанного префикса, обычно `NAKL_`.
+
+        Период фильтруется локально строго по `in_process_at`.
+        Запрос к Ozon расширяется назад на 31 день, потому что API списка
+        использует собственную фильтрацию дат, а отправление может быть
+        создано до даты фактического поступления в обработку.
+
+        Метод не меняет статус отправления и не подтверждает сборку.
+        """
+        if date_from > date_to:
+            raise ValueError(
+                "Дата начала периода Ozon не может быть позже даты конца."
+            )
+
+        if query_lookback_days < 1:
+            raise ValueError(
+                "Период поиска FBS-отправлений Ozon должен быть "
+                "не меньше одного дня."
+            )
+
+        prefix = offer_id_prefix.strip()
+
+        if not prefix:
+            raise ValueError(
+                "Префикс Ozon offer_id не может быть пустым."
+            )
+
+        target_start, target_end_exclusive = _period_boundaries(
+            date_from=date_from,
+            date_to=date_to,
+        )
+
+        query_start = target_start - timedelta(
+            days=query_lookback_days
+        )
+
+        postings = self._list_postings(
+            since=query_start,
+            to=target_end_exclusive,
+        )
+
+        unique_postings: dict[str, dict] = {}
+        fingerprints: dict[
+            str,
+            tuple[str, str, str, tuple[tuple[str, str], ...]],
+        ] = {}
+
+        for posting in postings:
+            posting_number = str(
+                posting.get("posting_number") or ""
+            ).strip()
+
+            if not posting_number:
+                raise OzonApiError(
+                    "Ozon вернул FBS-отправление без `posting_number`. "
+                    "Список этикеток не сформирован, чтобы исключить "
+                    "двойной учёт."
+                )
+
+            fingerprint = self._posting_fingerprint(posting)
+
+            previous_fingerprint = fingerprints.get(posting_number)
+
+            if previous_fingerprint is not None:
+                if previous_fingerprint != fingerprint:
+                    raise OzonApiError(
+                        "Ozon вернул один `posting_number` с разными "
+                        "данными. Список этикеток не сформирован, "
+                        "чтобы исключить неоднозначный выбор."
+                    )
+
+                continue
+
+            unique_postings[posting_number] = posting
+            fingerprints[posting_number] = fingerprint
+
+        result: list[OzonFbsStickerPosting] = []
+
+        for posting_number, posting in unique_postings.items():
+            status = str(posting.get("status") or "").strip()
+
+            if status != AWAITING_DELIVER_STATUS:
+                continue
+
+            if self._posting_is_test(posting):
+                continue
+
+            if self._posting_cancelled_after_ship(posting):
+                continue
+
+            in_process_at = _parse_ozon_datetime(
+                posting.get("in_process_at")
+            )
+
+            if in_process_at is None:
+                raise OzonApiError(
+                    "Ozon вернул отправление «Ожидает отгрузки» "
+                    "без корректного `in_process_at`. "
+                    "Список не сформирован, чтобы не включить "
+                    "отправление в неверную дату."
+                )
+
+            if not (
+                target_start
+                <= in_process_at
+                < target_end_exclusive
+            ):
+                continue
+
+            products = posting.get("products")
+
+            if not isinstance(products, list) or not products:
+                raise OzonApiError(
+                    "Ozon вернул FBS-отправление без списка товаров. "
+                    "Список этикеток не сформирован."
+                )
+
+            offer_quantities: dict[str, int] = {}
+
+            for product in products:
+                if not isinstance(product, dict):
+                    raise OzonApiError(
+                        "Ozon вернул некорректный товар в "
+                        "FBS-отправлении."
+                    )
+
+                offer_id = str(
+                    product.get("offer_id") or ""
+                ).strip()
+
+                if not offer_id:
+                    raise OzonApiError(
+                        "Ozon вернул товар без `offer_id` "
+                        "в FBS-отправлении."
+                    )
+
+                if not offer_id.startswith(prefix):
+                    continue
+
+                quantity = self._as_positive_quantity(
+                    value=product.get("quantity"),
+                    posting_number=posting_number,
+                    offer_id=offer_id,
+                )
+
+                offer_quantities[offer_id] = (
+                    offer_quantities.get(offer_id, 0)
+                    + quantity
+                )
+
+            if not offer_quantities:
+                continue
+
+            result.append(
+                OzonFbsStickerPosting(
+                    posting_number=posting_number,
+                    in_process_at=in_process_at,
+                    offer_quantities=offer_quantities,
+                )
+            )
+
+        return sorted(
+            result,
+            key=lambda posting: (
+                -posting.in_process_at.timestamp(),
+                posting.posting_number,
+            ),
+        )
+
+    def package_labels_pdf(
+        self,
+        posting_numbers: list[str],
+    ) -> list[bytes]:
+        """
+        Получает оригинальные PDF-этикетки Ozon.
+
+        Endpoint:
+
+        POST /v2/posting/fbs/package-label
+
+        Ozon разрешает не более 20 номеров отправлений в одном запросе.
+        Возвращается список PDF-частей в порядке запросов. Объединение
+        выполняется отдельным модулем без изменения оригинальных страниц.
+
+        Если этикетка ещё не готова, Ozon возвращает ошибку. Частичный
+        результат не возвращается: пользователь не получит неполный PDF.
+        """
+        normalized_numbers: list[str] = []
+        seen_numbers: set[str] = set()
+
+        for value in posting_numbers:
+            posting_number = str(value or "").strip()
+
+            if not posting_number:
+                raise ValueError(
+                    "Номер FBS-отправления Ozon не может быть пустым."
+                )
+
+            if posting_number in seen_numbers:
+                continue
+
+            seen_numbers.add(posting_number)
+            normalized_numbers.append(posting_number)
+
+        if not normalized_numbers:
+            raise ValueError(
+                "Выберите хотя бы одно FBS-отправление Ozon."
+            )
+
+        pdf_parts: list[bytes] = []
+
+        for offset in range(
+            0,
+            len(normalized_numbers),
+            PACKAGE_LABEL_BATCH_SIZE,
+        ):
+            batch = normalized_numbers[
+                offset:offset + PACKAGE_LABEL_BATCH_SIZE
+            ]
+
+            pdf_parts.append(
+                self._request_pdf(
+                    path="/v2/posting/fbs/package-label",
+                    payload={
+                        "posting_number": batch,
+                    },
+                )
+            )
+
+        return pdf_parts

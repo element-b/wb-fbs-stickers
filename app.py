@@ -20,6 +20,7 @@ from ozon_api import (
     OzonClient,
     OzonFbsDemandResult,
 )
+from ozon_fbs_stickers import render_ozon_fbs_stickers_tab
 from pdf_export import make_pdf
 from pdf_tab import render_open_pdf_button
 from pipeline import DataCheckError, collect_and_group
@@ -312,7 +313,7 @@ def init_session_state() -> None:
 
 
 def invalidate_result() -> None:
-    """Удаляет PDF и данные ранее сформированной партии."""
+    """Удаляет данные ранее сформированной WB-партии."""
     st.session_state["result"] = None
     st.session_state["reprint_lookup_key"] = None
     st.session_state["reprint_lookup_error"] = None
@@ -366,7 +367,7 @@ def authenticate(
     password: str,
     users: dict[str, str],
 ) -> bool:
-    """Проверяет введённые логин и пароль."""
+    """Проверяет введённые учётные данные."""
     matched = False
 
     for configured_username, configured_password in users.items():
@@ -428,7 +429,7 @@ def render_login_page(users: dict[str, str]) -> None:
 
 
 def logout() -> None:
-    """Выходит из приложения и очищает данные сессии."""
+    """Выходит из приложения и очищает сессию."""
     st.session_state.clear()
     st.rerun()
 
@@ -438,7 +439,7 @@ def logout() -> None:
 # ============================================================
 
 def get_secret(name: str) -> str:
-    """Безопасно читает строковое значение Streamlit Secret."""
+    """Безопасно читает строку из Streamlit Secrets."""
     try:
         return str(st.secrets[name]).strip()
     except Exception:
@@ -450,7 +451,7 @@ def get_secret(name: str) -> str:
 # ============================================================
 
 def parse_created_at(value: object) -> datetime | None:
-    """Преобразует WB createdAt в Europe/Moscow."""
+    """Преобразует WB `createdAt` во время Europe/Moscow."""
     if not isinstance(value, str) or not value.strip():
         return None
 
@@ -469,7 +470,7 @@ def parse_created_at(value: object) -> datetime | None:
 
 
 def supply_is_done(supply: dict) -> bool:
-    """Проверяет признак завершённой поставки WB."""
+    """Проверяет признак завершённой WB-поставки."""
     value = supply.get("done", False)
 
     if isinstance(value, bool):
@@ -480,7 +481,7 @@ def supply_is_done(supply: dict) -> bool:
 
 def format_supply_label(supply: dict) -> str:
     """Формирует подпись поставки для списка выбора."""
-    supply_id = str(supply.get("id", "")).strip()
+    supply_id = str(supply.get("id") or "").strip()
     name = str(supply.get("name") or "Без названия").strip()
 
     created_at = parse_created_at(supply.get("createdAt"))
@@ -513,7 +514,7 @@ def value_to_date(value: object) -> date | None:
 def parse_date_range(
     selected_value: object,
 ) -> tuple[date | None, date | None]:
-    """Получает начальную и конечную дату из st.date_input."""
+    """Получает дату либо диапазон дат из `st.date_input`."""
     if isinstance(selected_value, (tuple, list)):
         values = list(selected_value)
 
@@ -522,14 +523,14 @@ def parse_date_range(
 
         date_from = value_to_date(values[0])
 
+        if date_from is None:
+            return None, None
+
         date_to = (
             value_to_date(values[1])
             if len(values) > 1
             else date_from
         )
-
-        if date_from is None:
-            return None, None
 
         if date_to is None:
             date_to = date_from
@@ -551,7 +552,7 @@ def supply_matches_filters(
     date_to: date | None,
     status_filter: str,
 ) -> bool:
-    """Проверяет, подходит ли поставка текущим фильтрам."""
+    """Проверяет, соответствует ли поставка фильтрам."""
     if status_filter == "Только активные" and supply_is_done(supply):
         return False
 
@@ -590,7 +591,7 @@ def sort_supply_ids(
     supply_ids: list[str],
     supply_by_id: dict[str, dict],
 ) -> list[str]:
-    """Сортирует поставки: новые сверху."""
+    """Сортирует WB-поставки: новые сверху."""
 
     def sort_key(supply_id: str) -> tuple[float, str, str]:
         supply = supply_by_id[supply_id]
@@ -599,7 +600,7 @@ def sort_supply_ids(
         timestamp = (
             created_at.timestamp()
             if created_at is not None
-            else 0
+            else 0.0
         )
 
         return (
@@ -612,11 +613,11 @@ def sort_supply_ids(
 
 
 # ============================================================
-# ПЕРЕПЕЧАТКА ПО КОДУ
+# ПЕРЕПЕЧАТКА WB-СТИКЕРА
 # ============================================================
 
 def parse_sticker_code(value: str) -> str | None:
-    """Преобразует код стикера в формат partA partB."""
+    """Преобразует код WB-стикера в единый формат."""
     match = re.fullmatch(
         r"\s*(\d+)\s*[\s,;/\-]+\s*(\d+)\s*",
         value or "",
@@ -629,7 +630,7 @@ def parse_sticker_code(value: str) -> str | None:
 
 
 def render_reprint_search(result: dict) -> None:
-    """Отображает поиск и перепечатку стикера текущей партии."""
+    """Отображает поиск и перепечатку WB-стикера."""
     summary = result["summary"]
     lookup = summary.get("sticker_lookup", {})
 
@@ -747,11 +748,11 @@ def render_reprint_search(result: dict) -> None:
 
 
 # ============================================================
-# РЕЗУЛЬТАТЫ ПЕЧАТИ СТИКЕРОВ
+# РЕЗУЛЬТАТЫ ПЕЧАТИ WB-СТИКЕРОВ
 # ============================================================
 
 def build_article_table(summary: dict) -> pd.DataFrame:
-    """Строит таблицу артикулов с количеством и СЦ назначения."""
+    """Строит таблицу артикулов WB со стикерами и направлениями."""
     rows = []
 
     for group in summary["groups"]:
@@ -770,7 +771,7 @@ def build_article_table(summary: dict) -> pd.DataFrame:
 
 
 def render_results(result: dict) -> None:
-    """Отображает итоговую таблицу, перепечатку и ссылки на PDF."""
+    """Отображает итоговый результат формирования WB-стикеров."""
     summary = result["summary"]
 
     st.divider()
@@ -934,11 +935,6 @@ def render_results(result: dict) -> None:
     st.divider()
     st.subheader("🔗 Стикеры по отдельным артикулам")
 
-    st.caption(
-        "Каждый PDF начинается со служебной этикетки. "
-        "Для рулонной печати PDF также сформирован в обратном порядке."
-    )
-
     article_pdf_by_name = dict(result["article_pdfs"])
 
     group_by_article = {
@@ -1010,7 +1006,7 @@ def render_results(result: dict) -> None:
 # ============================================================
 
 def render_stickers_tab(client: WBClient) -> None:
-    """Отображает существующую вкладку формирования WB-стикеров."""
+    """Отображает вкладку формирования WB-стикеров."""
     st.title("📦 Стикеры сборочных заданий WB FBS")
 
     st.markdown(
@@ -1066,7 +1062,7 @@ def render_stickers_tab(client: WBClient) -> None:
         if not isinstance(supply, dict):
             continue
 
-        supply_id = str(supply.get("id", "")).strip()
+        supply_id = str(supply.get("id") or "").strip()
 
         if supply_id:
             supply_by_id[supply_id] = supply
@@ -1236,7 +1232,6 @@ def render_stickers_tab(client: WBClient) -> None:
         )
 
     sticker_width, sticker_height = STICKER_SIZES[sticker_size_name]
-
     reverse_print_order = PRINT_ORDER_OPTIONS[print_order_label]
 
     selected_supplies = [
@@ -1357,7 +1352,7 @@ def ensure_short_term_configuration(
     ozon_client_id: str,
     ozon_api_key: str,
 ) -> bool:
-    """Проверяет Secrets, необходимые только для вкладки планирования."""
+    """Проверяет Secrets, необходимые для вкладки планирования."""
     missing = []
 
     if not mysklad_token:
@@ -1469,7 +1464,7 @@ def render_short_term_plan_table(
 def render_short_term_shift_list(
     result: ShortTermPlanResult,
 ) -> None:
-    """Показывает короткую очередь действий для производства."""
+    """Показывает краткий список задач для производства."""
     st.subheader("📋 Краткий план для производства")
 
     if result.queue_table.empty:
@@ -1499,7 +1494,7 @@ def render_short_term_shift_list(
 def render_short_term_plan_tab(
     wb_client: WBClient,
 ) -> None:
-    """Отображает общую краткосрочную очередь WB FBS + Ozon FBS."""
+    """Отображает общую производственную очередь WB FBS + Ozon FBS."""
     st.title("⚡ Краткосрочный план FBS")
 
     st.markdown(
@@ -1904,14 +1899,17 @@ def render_sidebar() -> None:
         st.markdown(
             """
             - **Стикеры WB FBS** — выбор поставок, PDF и XLSX.
+            - **Стикеры FBS Ozon** — оригинальные QR-этикетки
+              собранных FBS-отправлений Ozon со статусом
+              «Ожидает отгрузки».
             - **Краткосрочный план FBS** — WB FBS + Ozon FBS против
               физического остатка готовой продукции.
             - **Статус отгрузок WB по кластерам** — read-only контроль
               статусов заданий завершённых WB-поставок.
             - **Отгрузки МоегоСклада** — количество товара в отгрузках
               по выбранным статусам.
-            - **Сверка заказов и отгрузок FBO** — недобор и перебор
-              товаров по артикулам для выбранных контрагентов.
+            - **Диагностика заказов и отгрузок FBO** — проверка
+              связанных отгрузок, артикулов и количеств.
             """
         )
 
@@ -1943,7 +1941,7 @@ def render_sidebar() -> None:
 # ============================================================
 
 def main() -> None:
-    """Запускает SPA-приложение."""
+    """Запускает единое Streamlit SPA-приложение."""
     init_session_state()
 
     users = get_users()
@@ -1966,6 +1964,7 @@ def main() -> None:
 
     (
         stickers_tab,
+        ozon_stickers_tab,
         planning_tab,
         shipment_status_tab,
         mysklad_shipments_tab,
@@ -1973,15 +1972,19 @@ def main() -> None:
     ) = st.tabs(
         [
             "📦 Стикеры WB FBS",
+            "🏷️ Стикеры FBS OZON",
             "⚡ Краткосрочный план FBS",
             "🚚 Статус отгрузок WB по кластерам",
             "📊 Отгрузки МоегоСклада",
-            "⚖️ Сверка заказов и отгрузок FBO",
+            "🧪 Диагностика заказов и отгрузок FBO",
         ]
     )
 
     with stickers_tab:
         render_stickers_tab(wb_client)
+
+    with ozon_stickers_tab:
+        render_ozon_fbs_stickers_tab()
 
     with planning_tab:
         render_short_term_plan_tab(wb_client)
