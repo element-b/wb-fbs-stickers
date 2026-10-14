@@ -1,27 +1,27 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import date, datetime
-from io import BytesIO
 from typing import Any
 
 import pandas as pd
 import streamlit as st
-from pypdf import PdfReader, PdfWriter
 
 from ozon_api import (
-    AWAITING_DELIVER_STATUS,
     MOSCOW_TZ,
     OzonApiError,
     OzonClient,
     OzonFbsStickerPosting,
 )
+from ozon_mysklad_export import make_ozon_mysklad_xlsx
+from ozon_pdf_export import make_ozon_grouped_labels_pdf
 
 
 OZON_FBS_OFFER_PREFIX = "NAKL_"
 
 
 def _value_to_date(value: object) -> date | None:
-    """Преобразует значение Streamlit в объект date."""
+    """Преобразует значение Streamlit в date."""
     if isinstance(value, datetime):
         return value.date()
 
@@ -34,7 +34,7 @@ def _value_to_date(value: object) -> date | None:
 def _parse_date_range(
     selected_value: object,
 ) -> tuple[date | None, date | None]:
-    """Разбирает одиночную дату либо диапазон из st.date_input."""
+    """Разбирает одну дату либо диапазон из `st.date_input`."""
     if isinstance(selected_value, (tuple, list)):
         values = list(selected_value)
 
@@ -69,7 +69,7 @@ def _format_date_range(
     date_from: date | None,
     date_to: date | None,
 ) -> str:
-    """Форматирует выбранный период для интерфейса."""
+    """Форматирует выбранный период."""
     if date_from is None or date_to is None:
         return "Дата не выбрана"
 
@@ -85,7 +85,7 @@ def _format_date_range(
 def _format_posting_label(
     posting: OzonFbsStickerPosting,
 ) -> str:
-    """Создаёт подпись FBS-отправления в списке выбора."""
+    """Формирует подпись Ozon FBS-отправления для списка."""
     articles = ", ".join(posting.offer_ids)
 
     return (
@@ -100,13 +100,13 @@ def _safe_posting_label_or_missing(
     posting_number: str,
     postings_by_number: dict[str, OzonFbsStickerPosting],
 ) -> str:
-    """Сохраняет ранее выбранное отправление в мультивыборе."""
+    """Сохраняет временно скрытое отправление в мультивыборе."""
     posting = postings_by_number.get(posting_number)
 
     if posting is None:
         return (
-            f"{posting_number} | больше не найдено в последнем "
-            "ответе Ozon"
+            f"{posting_number} | больше не найдено "
+            "в последнем ответе Ozon"
         )
 
     return _format_posting_label(posting)
@@ -116,7 +116,7 @@ def _posting_matches_search(
     posting: OzonFbsStickerPosting,
     search_text: str,
 ) -> bool:
-    """Фильтрует отправление локально без API-запросов."""
+    """Фильтрует отправление локально без новых API-запросов."""
     normalized_search = search_text.strip().casefold()
 
     if not normalized_search:
@@ -135,11 +135,11 @@ def _build_article_summary(
     postings: list[OzonFbsStickerPosting],
 ) -> list[dict[str, Any]]:
     """
-    Группирует выбранные отправления по NAKL_-артикулам.
+    Суммирует фактическое quantity NAKL_-товаров по offer_id.
 
-    Одно FBS-отправление может содержать несколько NAKL_-товаров.
-    Поэтому количество отправлений по артикулу считается по уникальному
-    набору номеров отправлений, а количество товаров — суммой quantity.
+    Одно отправление может содержать несколько одинаковых или разных
+    артикулов. Количество отправлений у артикула считается по уникальным
+    номерам отправлений, а количество товаров — суммой quantity.
     """
     grouped: dict[str, dict[str, Any]] = {}
 
@@ -179,7 +179,7 @@ def _build_article_summary(
 def _build_selected_posting_rows(
     postings: list[OzonFbsStickerPosting],
 ) -> list[dict[str, Any]]:
-    """Готовит безопасную таблицу выбранных отправлений."""
+    """Создаёт безопасную таблицу выбранных Ozon-отправлений."""
     rows: list[dict[str, Any]] = []
 
     for posting in postings:
@@ -197,83 +197,135 @@ def _build_selected_posting_rows(
     return rows
 
 
-def _merge_ozon_label_pdfs(
-    pdf_parts: list[bytes],
-) -> bytes:
+def _build_print_groups(
+    postings: list[OzonFbsStickerPosting],
+    label_pdf_by_posting_number: dict[str, bytes],
+) -> list[dict[str, Any]]:
     """
-    Объединяет оригинальные PDF-этикетки Ozon в один PDF.
+    Строит группы для итогового PDF.
 
-    Страницы Ozon не растеризуются, не масштабируются, не обрезаются
-    и не перерисовываются. В итоговый файл копируются исходные страницы.
+    Обычная группа:
+
+    ```text
+    Задание с артикулом и общим количеством
+    → оригинальные QR-этикетки Ozon соответствующих отправлений
+    ```
+
+    Группировка по артикулу возможна безопасно только у отправлений
+    с одним NAKL_-артикулом. Если в одном отправлении несколько
+    NAKL_-артикулов, перед его QR-этикеткой печатается отдельное
+    многотоварное задание. Так один QR-код не будет продублирован
+    в нескольких группах.
     """
-    if not pdf_parts:
-        raise ValueError(
-            "Ozon не вернул ни одного PDF-файла с этикетками."
+    single_article_postings: dict[
+        str,
+        list[OzonFbsStickerPosting],
+    ] = defaultdict(list)
+
+    multi_article_postings: list[OzonFbsStickerPosting] = []
+
+    for posting in postings:
+        if len(posting.offer_quantities) == 1:
+            article = next(iter(posting.offer_quantities))
+            single_article_postings[article].append(posting)
+        else:
+            multi_article_postings.append(posting)
+
+    groups: list[dict[str, Any]] = []
+
+    for article in sorted(
+        single_article_postings,
+        key=lambda value: (value.casefold(), value),
+    ):
+        article_postings = sorted(
+            single_article_postings[article],
+            key=lambda posting: (
+                posting.in_process_at,
+                posting.posting_number,
+            ),
         )
 
-    writer = PdfWriter()
-    source_streams: list[BytesIO] = []
+        label_pdfs: list[bytes] = []
 
-    try:
-        for pdf_bytes in pdf_parts:
-            if not isinstance(pdf_bytes, bytes):
-                raise ValueError(
-                    "Ozon вернул некорректное содержимое PDF-этикетки."
-                )
-
-            if not pdf_bytes.startswith(b"%PDF-"):
-                raise ValueError(
-                    "Ozon вернул этикетку не в формате PDF."
-                )
-
-            source = BytesIO(pdf_bytes)
-            source_streams.append(source)
-
-            try:
-                reader = PdfReader(
-                    source,
-                    strict=False,
-                )
-            except Exception as error:
-                raise ValueError(
-                    "Не удалось прочитать PDF-этикетку Ozon."
-                ) from error
-
-            if reader.is_encrypted:
-                raise ValueError(
-                    "Ozon вернул защищённый PDF, который невозможно "
-                    "безопасно объединить."
-                )
-
-            if not reader.pages:
-                raise ValueError(
-                    "Ozon вернул PDF без страниц этикеток."
-                )
-
-            for page in reader.pages:
-                writer.add_page(page)
-
-        output = BytesIO()
-        writer.write(output)
-
-        merged_pdf = output.getvalue()
-
-        if not merged_pdf.startswith(b"%PDF-"):
-            raise ValueError(
-                "Не удалось подготовить итоговый PDF этикеток Ozon."
+        for posting in article_postings:
+            label_pdf = label_pdf_by_posting_number.get(
+                posting.posting_number
             )
 
-        return merged_pdf
+            if not label_pdf:
+                raise ValueError(
+                    "Не найдена QR-этикетка Ozon для отправления "
+                    f"`{posting.posting_number}`."
+                )
 
-    finally:
-        for stream in source_streams:
-            stream.close()
+            label_pdfs.append(label_pdf)
+
+        groups.append(
+            {
+                "title": article,
+                "items": [
+                    (
+                        article,
+                        sum(
+                            posting.offer_quantities[article]
+                            for posting in article_postings
+                        ),
+                    )
+                ],
+                "posting_count": len(article_postings),
+                "label_pdfs": label_pdfs,
+            }
+        )
+
+    for posting in sorted(
+        multi_article_postings,
+        key=lambda value: (
+            value.in_process_at,
+            value.posting_number,
+        ),
+    ):
+        label_pdf = label_pdf_by_posting_number.get(
+            posting.posting_number
+        )
+
+        if not label_pdf:
+            raise ValueError(
+                "Не найдена QR-этикетка Ozon для отправления "
+                f"`{posting.posting_number}`."
+            )
+
+        items = sorted(
+            posting.offer_quantities.items(),
+            key=lambda item: (
+                item[0].casefold(),
+                item[0],
+            ),
+        )
+
+        groups.append(
+            {
+                "title": (
+                    "OZON FBS — "
+                    f"{posting.posting_number}"
+                ),
+                "items": items,
+                "posting_count": 1,
+                "label_pdfs": [label_pdf],
+            }
+        )
+
+    if not groups:
+        raise ValueError(
+            "Не удалось создать группы печати Ozon."
+        )
+
+    return groups
 
 
 def _render_article_summary(
     rows: list[dict[str, Any]],
 ) -> None:
-    """Показывает группировку выбранных отправлений по артикулам."""
+    """Показывает сводку выбранных отправлений по offer_id."""
     table = pd.DataFrame(
         rows,
         columns=[
@@ -307,7 +359,7 @@ def _render_article_summary(
 def _render_selected_postings(
     rows: list[dict[str, Any]],
 ) -> None:
-    """Показывает отправления, вошедшие в печать."""
+    """Показывает отправления, вошедшие в PDF и XLSX."""
     table = pd.DataFrame(
         rows,
         columns=[
@@ -344,7 +396,7 @@ def _render_selected_postings(
 
 
 def _init_state() -> None:
-    """Инициализирует состояние новой Ozon-вкладки."""
+    """Инициализирует состояние вкладки Ozon FBS."""
     defaults = {
         "ozon_fbs_sticker_postings": None,
         "ozon_fbs_sticker_result": None,
@@ -377,10 +429,10 @@ def _get_ozon_credentials() -> tuple[str, str]:
 
 def render_ozon_fbs_stickers_tab() -> None:
     """
-    Отображает вкладку печати оригинальных QR-этикеток Ozon FBS.
+    Отображает вкладку оригинальных Ozon QR-этикеток.
 
-    Вкладка не подтверждает сборку и не меняет статусы. Она работает
-    только с уже собранными отправлениями `awaiting_deliver`.
+    Вкладка работает только с уже собранными FBS-отправлениями
+    в статусе `awaiting_deliver`. Никакие статусы Ozon не меняются.
     """
     _init_state()
 
@@ -389,26 +441,24 @@ def render_ozon_fbs_stickers_tab() -> None:
     st.markdown(
         """
         <div class="description-box">
-            После того как менеджер вручную нажал «Собрать» в кабинете
-            Ozon и отправления перешли в статус «Ожидает отгрузки»,
-            выберите нужные задания и получите оригинальные PDF-этикетки
-            Ozon с QR-кодами.
+            После ручного нажатия «Собрать» в кабинете Ozon выберите
+            FBS-отправления в статусе «Ожидает отгрузки». Приложение
+            напечатает перед QR-этикетками задания с артикулом и
+            количеством товаров, а также подготовит XLSX для МойСклад.
         </div>
         """,
         unsafe_allow_html=True,
     )
 
     st.caption(
-        "Источник: FBS-отправления Ozon с точным статусом "
-        "`awaiting_deliver` («Ожидает отгрузки»). "
-        "В список попадают только отправления, содержащие товары "
-        f"с offer_id, начинающимся с `{OZON_FBS_OFFER_PREFIX}`."
+        "В список попадают только FBS-отправления Ozon с точным "
+        "статусом `awaiting_deliver` и товарами, у которых offer_id "
+        f"начинается с `{OZON_FBS_OFFER_PREFIX}`."
     )
 
     st.caption(
-        "Вкладка выполняет только read-only запросы. "
-        "Она не нажимает «Собрать», не меняет статусы и не отменяет "
-        "отправления."
+        "Все действия read-only: приложение не подтверждает сборку, "
+        "не меняет статусы и не отменяет отправления Ozon."
     )
 
     ozon_client_id, ozon_api_key = _get_ozon_credentials()
@@ -441,9 +491,8 @@ def render_ozon_fbs_stickers_tab() -> None:
             format="DD.MM.YYYY",
             key="ozon_fbs_sticker_date_range",
             help=(
-                "Фильтруется поле Ozon `in_process_at` в часовом поясе "
-                "Europe/Moscow. По умолчанию отображаются задания, "
-                "поступившие в работу сегодня."
+                "Фильтруется поле Ozon `in_process_at` "
+                "в часовом поясе Europe/Moscow."
             ),
         )
 
@@ -675,7 +724,7 @@ def render_ozon_fbs_stickers_tab() -> None:
     st.markdown("<br>", unsafe_allow_html=True)
 
     generate_clicked = st.button(
-        "🖨️ Получить и подготовить QR-этикетки Ozon",
+        "🖨️ Подготовить задания, QR-этикетки и XLSX",
         type="primary",
         use_container_width=True,
         key="generate_ozon_fbs_sticker_pdf",
@@ -684,9 +733,10 @@ def render_ozon_fbs_stickers_tab() -> None:
             or bool(missing_selected_numbers)
         ),
         help=(
-            "Ozon рекомендует запрашивать этикетки через 45–60 секунд "
-            "после ручного подтверждения сборки. Если этикетки ещё "
-            "не готовы, повторите запрос позже."
+            "Для точного сопоставления служебного задания с QR-кодом "
+            "этикетки Ozon запрашиваются по одному отправлению. "
+            "Если Ozon ещё не подготовил этикетки, повторите запрос "
+            "через 45–60 секунд."
         ),
     )
 
@@ -700,22 +750,48 @@ def render_ozon_fbs_stickers_tab() -> None:
 
         try:
             with st.spinner(
-                "Получаю оригинальные QR-этикетки Ozon "
-                "и объединяю PDF…"
+                "Получаю оригинальные QR-этикетки Ozon, создаю "
+                "служебные задания и XLSX…"
             ):
-                pdf_parts = client.package_labels_pdf(
-                    posting_numbers=[
+                label_pdf_by_posting_number: dict[str, bytes] = {}
+
+                for posting in selected_postings:
+                    # Запрос по одному отправлению нужен, чтобы QR-этикетка
+                    # была связана с конкретным заданием и артикулом.
+                    pdf_parts = client.package_labels_pdf(
+                        posting_numbers=[
+                            posting.posting_number
+                        ]
+                    )
+
+                    if len(pdf_parts) != 1:
+                        raise OzonApiError(
+                            "Ozon вернул неожиданный набор PDF-этикеток "
+                            "для одного FBS-отправления. Неполный файл "
+                            "не сформирован."
+                        )
+
+                    label_pdf_by_posting_number[
                         posting.posting_number
-                        for posting in selected_postings
-                    ]
+                    ] = pdf_parts[0]
+
+                print_groups = _build_print_groups(
+                    postings=selected_postings,
+                    label_pdf_by_posting_number=(
+                        label_pdf_by_posting_number
+                    ),
                 )
 
-                merged_pdf = _merge_ozon_label_pdfs(
-                    pdf_parts=pdf_parts
+                full_pdf = make_ozon_grouped_labels_pdf(
+                    groups=print_groups
                 )
 
                 article_summary = _build_article_summary(
                     postings=selected_postings
+                )
+
+                mysklad_xlsx = make_ozon_mysklad_xlsx(
+                    article_rows=article_summary
                 )
 
                 selected_posting_rows = (
@@ -727,7 +803,8 @@ def render_ozon_fbs_stickers_tab() -> None:
             st.session_state["ozon_fbs_sticker_result"] = {
                 "signature": result_signature,
                 "generated_at": datetime.now(MOSCOW_TZ),
-                "pdf": merged_pdf,
+                "full_pdf": full_pdf,
+                "mysklad_xlsx": mysklad_xlsx,
                 "article_summary": article_summary,
                 "selected_posting_rows": selected_posting_rows,
                 "posting_count": len(selected_postings),
@@ -736,10 +813,11 @@ def render_ozon_fbs_stickers_tab() -> None:
                     posting.total_quantity
                     for posting in selected_postings
                 ),
+                "group_count": len(print_groups),
             }
 
             st.success(
-                "Оригинальные QR-этикетки Ozon готовы к печати."
+                "Задания, оригинальные QR-этикетки Ozon и XLSX готовы."
             )
 
         except (OzonApiError, ValueError) as error:
@@ -755,15 +833,14 @@ def render_ozon_fbs_stickers_tab() -> None:
     ):
         st.info(
             "Выберите FBS-отправления в статусе "
-            "«Ожидает отгрузки» и нажмите кнопку подготовки "
-            "QR-этикеток."
+            "«Ожидает отгрузки» и подготовьте задания с QR-этикетками."
         )
         return
 
     st.divider()
     st.subheader("📊 Сводка выбранных отправлений")
 
-    metric_1, metric_2, metric_3 = st.columns(3)
+    metric_1, metric_2, metric_3, metric_4 = st.columns(4)
 
     metric_1.metric(
         "Отправлений",
@@ -780,8 +857,13 @@ def render_ozon_fbs_stickers_tab() -> None:
         saved_result["article_count"],
     )
 
+    metric_4.metric(
+        "Печатных заданий",
+        saved_result["group_count"],
+    )
+
     st.caption(
-        "PDF сформирован: "
+        "Файлы сформированы: "
         f"{saved_result['generated_at'].strftime('%d.%m.%Y %H:%M')} "
         "по Москве."
     )
@@ -799,27 +881,51 @@ def render_ozon_fbs_stickers_tab() -> None:
     )
 
     st.divider()
-    st.subheader("📥 Оригинальные QR-этикетки Ozon")
+    st.subheader("📥 PDF и XLSX для МойСклад")
 
     st.caption(
-        "Итоговый файл содержит оригинальные PDF-страницы Ozon. "
-        "QR-коды и разметка Ozon не перерисовывались и не изменялись."
+        "В PDF перед каждой группой QR-этикеток печатается задание "
+        "с артикулом и количеством товаров. Оригинальные QR-этикетки "
+        "Ozon не перерисовываются и не изменяются."
     )
 
     timestamp = saved_result["generated_at"].strftime(
         "%Y%m%d_%H%M%S"
     )
 
-    st.download_button(
-        label="📥 Скачать PDF с QR-этикетками Ozon",
-        data=saved_result["pdf"],
-        file_name=f"ozon_fbs_qr_labels_{timestamp}.pdf",
-        mime="application/pdf",
-        use_container_width=True,
+    pdf_col, xlsx_col = st.columns(2)
+
+    with pdf_col:
+        st.download_button(
+            label="📥 Скачать PDF: задания и QR-этикетки Ozon",
+            data=saved_result["full_pdf"],
+            file_name=(
+                f"ozon_fbs_tasks_and_qr_labels_{timestamp}.pdf"
+            ),
+            mime="application/pdf",
+            use_container_width=True,
+        )
+
+    with xlsx_col:
+        st.download_button(
+            label="📊 Скачать XLSX для МойСклад",
+            data=saved_result["mysklad_xlsx"],
+            file_name=f"ozon_fbs_mysklad_{timestamp}.xlsx",
+            mime=(
+                "application/vnd.openxmlformats-officedocument"
+                ".spreadsheetml.sheet"
+            ),
+            use_container_width=True,
+        )
+
+    st.caption(
+        "XLSX содержит две колонки: `Артикул` и `Количество`. "
+        "Количество — сумма товаров NAKL_ по всем выбранным "
+        "FBS-отправлениям Ozon."
     )
 
     st.warning(
-        "Перед рабочей печатью выполните пробу на одной этикетке. "
+        "Перед рабочей печатью выполните пробу на одной группе. "
         "В окне печати выберите масштаб 100% / «Фактический размер» "
         "и отключите автоматическое подгоняние по странице."
     )
