@@ -19,6 +19,11 @@ from ozon_pdf_export import make_ozon_grouped_labels_pdf
 
 OZON_FBS_OFFER_PREFIX = "NAKL_"
 
+PRINT_ORDER_OPTIONS = {
+    "Для рулона — обратный порядок": True,
+    "Обычный порядок": False,
+}
+
 
 def _value_to_date(value: object) -> date | None:
     """Преобразует значение Streamlit в date."""
@@ -135,7 +140,7 @@ def _build_article_summary(
     postings: list[OzonFbsStickerPosting],
 ) -> list[dict[str, Any]]:
     """
-    Суммирует фактическое quantity NAKL_-товаров по offer_id.
+    Суммирует quantity NAKL_-товаров по offer_id.
 
     Одно отправление может содержать несколько одинаковых или разных
     артикулов. Количество отправлений у артикула считается по уникальным
@@ -179,7 +184,7 @@ def _build_article_summary(
 def _build_selected_posting_rows(
     postings: list[OzonFbsStickerPosting],
 ) -> list[dict[str, Any]]:
-    """Создаёт безопасную таблицу выбранных Ozon-отправлений."""
+    """Создаёт таблицу выбранных Ozon-отправлений."""
     rows: list[dict[str, Any]] = []
 
     for posting in postings:
@@ -204,18 +209,16 @@ def _build_print_groups(
     """
     Строит группы для итогового PDF.
 
-    Обычная группа:
+    Для однотоварного отправления:
 
     ```text
-    Задание с артикулом и общим количеством
-    → оригинальные QR-этикетки Ozon соответствующих отправлений
+    Задание артикула с общим количеством
+    → оригинальные QR-этикетки соответствующих отправлений
     ```
 
-    Группировка по артикулу возможна безопасно только у отправлений
-    с одним NAKL_-артикулом. Если в одном отправлении несколько
-    NAKL_-артикулов, перед его QR-этикеткой печатается отдельное
-    многотоварное задание. Так один QR-код не будет продублирован
-    в нескольких группах.
+    Если в одном отправлении несколько NAKL_-артикулов, QR-этикетка
+    не дублируется. Перед ней печатается отдельное задание со списком
+    артикулов и количеством каждого.
     """
     single_article_postings: dict[
         str,
@@ -359,7 +362,7 @@ def _render_article_summary(
 def _render_selected_postings(
     rows: list[dict[str, Any]],
 ) -> None:
-    """Показывает отправления, вошедшие в PDF и XLSX."""
+    """Показывает отправления, вошедшие в печать."""
     table = pd.DataFrame(
         rows,
         columns=[
@@ -431,8 +434,8 @@ def render_ozon_fbs_stickers_tab() -> None:
     """
     Отображает вкладку оригинальных Ozon QR-этикеток.
 
-    Вкладка работает только с уже собранными FBS-отправлениями
-    в статусе `awaiting_deliver`. Никакие статусы Ozon не меняются.
+    Работает только с уже собранными FBS-отправлениями в статусе
+    `awaiting_deliver`. Статусы Ozon не изменяются.
     """
     _init_state()
 
@@ -706,8 +709,28 @@ def render_ozon_fbs_stickers_tab() -> None:
             len(unique_articles),
         )
 
-    result_signature = tuple(
-        sorted(unique_selected_numbers)
+    st.divider()
+    st.subheader("Параметры печати")
+
+    print_order_label = st.selectbox(
+        "Порядок печати",
+        options=list(PRINT_ORDER_OPTIONS.keys()),
+        index=0,
+        key="ozon_fbs_print_order",
+        help=(
+            "Для рулона PDF-страницы разворачиваются. После размотки "
+            "ленты задания и соответствующие QR-этикетки Ozon будут "
+            "идти в обычном рабочем порядке."
+        ),
+    )
+
+    reverse_print_order = PRINT_ORDER_OPTIONS[
+        print_order_label
+    ]
+
+    result_signature = (
+        tuple(sorted(unique_selected_numbers)),
+        reverse_print_order,
     )
 
     saved_result = st.session_state.get(
@@ -756,8 +779,6 @@ def render_ozon_fbs_stickers_tab() -> None:
                 label_pdf_by_posting_number: dict[str, bytes] = {}
 
                 for posting in selected_postings:
-                    # Запрос по одному отправлению нужен, чтобы QR-этикетка
-                    # была связана с конкретным заданием и артикулом.
                     pdf_parts = client.package_labels_pdf(
                         posting_numbers=[
                             posting.posting_number
@@ -783,7 +804,8 @@ def render_ozon_fbs_stickers_tab() -> None:
                 )
 
                 full_pdf = make_ozon_grouped_labels_pdf(
-                    groups=print_groups
+                    groups=print_groups,
+                    reverse_page_order=reverse_print_order,
                 )
 
                 article_summary = _build_article_summary(
@@ -814,6 +836,7 @@ def render_ozon_fbs_stickers_tab() -> None:
                     for posting in selected_postings
                 ),
                 "group_count": len(print_groups),
+                "reverse_print_order": reverse_print_order,
             }
 
             st.success(
@@ -867,6 +890,19 @@ def render_ozon_fbs_stickers_tab() -> None:
         f"{saved_result['generated_at'].strftime('%d.%m.%Y %H:%M')} "
         "по Москве."
     )
+
+    if saved_result["reverse_print_order"]:
+        order_caption = (
+            "PDF сформирован в обратном порядке страниц для рулонной "
+            "печати. При размотке ленты задания и QR-этикетки будут "
+            "идти в рабочем порядке."
+        )
+    else:
+        order_caption = (
+            "PDF сформирован в обычном логическом порядке страниц."
+        )
+
+    st.caption(order_caption)
 
     st.subheader("Артикулы NAKL_ в выбранных отправлениях")
 

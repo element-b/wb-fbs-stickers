@@ -28,8 +28,8 @@ def _separator_font_name() -> str:
     """
     Возвращает Unicode-шрифт для служебных этикеток Ozon.
 
-    Если Unicode-шрифт недоступен, используется Helvetica. На Streamlit
-    Community Cloud обычно доступен DejaVu Sans с поддержкой кириллицы.
+    DejaVu Sans обычно доступен в Streamlit Community Cloud
+    и поддерживает кириллицу.
     """
     if SEPARATOR_FONT_NAME in pdfmetrics.getRegisteredFontNames():
         return SEPARATOR_FONT_NAME
@@ -58,7 +58,7 @@ def _split_text_by_width(
     font_size: float,
     max_width: float,
 ) -> list[str]:
-    """Разбивает строку на части, не меняя символы артикула."""
+    """Разбивает текст на строки без изменения символов артикула."""
     if not text:
         return [""]
 
@@ -93,7 +93,7 @@ def _article_layout(
     max_width: float,
     max_lines: int = 3,
 ) -> tuple[float, list[str]]:
-    """Подбирает размер шрифта и переносы длинного артикула."""
+    """Подбирает размер шрифта и переносы для длинного артикула."""
     clean_article = str(article or "").strip()
 
     for font_size in range(18, 6, -1):
@@ -119,10 +119,10 @@ def _page_dimensions_from_pdf(
     pdf_bytes: bytes,
 ) -> tuple[float, float]:
     """
-    Получает размер первой страницы оригинального PDF Ozon в points.
+    Получает размер первой страницы оригинального PDF Ozon.
 
-    Служебная этикетка создаётся того же размера, что и следующая
-    оригинальная QR-этикетка Ozon.
+    Служебная этикетка создаётся в точно таком же формате, что и
+    следующая оригинальная QR-этикетка.
     """
     if not isinstance(pdf_bytes, bytes) or not pdf_bytes:
         raise ValueError(
@@ -201,17 +201,17 @@ def _create_task_separator_pdf(
     page_height: float,
 ) -> bytes:
     """
-    Создаёт одну служебную страницу перед оригинальными QR-этикетками.
+    Создаёт служебную страницу задания перед QR-этикетками Ozon.
 
-    Для одной товарной группы выводится:
+    Для одного артикула указываются:
 
-    - название артикула;
-    - суммарное количество товара;
-    - число QR-этикеток / отправлений.
+    - артикул;
+    - суммарное количество;
+    - количество QR-этикеток / отправлений.
 
-    Для многотоварного FBS-отправления выводится список артикулов
-    и количеств. Это предотвращает дублирование одного QR-кода в двух
-    товарных группах.
+    Для многотоварного отправления выводится список артикулов
+    и количеств, потому что один QR-код нельзя дублировать в разных
+    группах товаров.
     """
     if not items:
         raise ValueError(
@@ -323,9 +323,7 @@ def _create_task_separator_pdf(
         pdf.drawCentredString(
             page_width / 2,
             current_y,
-            (
-                f"QR-этикеток Ozon: {posting_count}"
-            ),
+            f"QR-этикеток Ozon: {posting_count}",
         )
 
     else:
@@ -441,10 +439,10 @@ def _append_pdf_pages(
     pdf_bytes: bytes,
 ) -> None:
     """
-    Добавляет оригинальные страницы Ozon в итоговый PDF без изменений.
+    Добавляет оригинальные страницы Ozon в итоговый PDF.
 
-    Оригинальные QR-коды не растеризуются, не масштабируются,
-    не обрезаются и не перерисовываются.
+    QR-коды и оригинальная разметка Ozon не изменяются:
+    страницы не растеризуются, не масштабируются и не обрезаются.
     """
     if not isinstance(pdf_bytes, bytes) or not pdf_bytes:
         raise ValueError(
@@ -480,31 +478,75 @@ def _append_pdf_pages(
         writer.add_page(page)
 
 
+def _reverse_pdf_page_order(
+    pdf_bytes: bytes,
+) -> bytes:
+    """
+    Полностью разворачивает порядок страниц готового PDF.
+
+    Для рулонной печати страницы печатаются в обратной последовательности.
+    После размотки рулона служебное задание и соответствующие QR-этикетки
+    идут в обычном логическом порядке.
+
+    Содержимое страниц, включая QR-коды Ozon, не изменяется.
+    """
+    if not pdf_bytes.startswith(b"%PDF-"):
+        raise ValueError(
+            "Не удалось развернуть порядок страниц PDF Ozon."
+        )
+
+    try:
+        reader = PdfReader(
+            BytesIO(pdf_bytes),
+            strict=False,
+        )
+    except Exception as error:
+        raise ValueError(
+            "Не удалось прочитать итоговый PDF Ozon."
+        ) from error
+
+    if reader.is_encrypted:
+        raise ValueError(
+            "Итоговый PDF Ozon защищён и не может быть развёрнут."
+        )
+
+    if not reader.pages:
+        raise ValueError(
+            "Итоговый PDF Ozon не содержит страниц."
+        )
+
+    writer = PdfWriter()
+
+    for page in reversed(reader.pages):
+        writer.add_page(page)
+
+    output = BytesIO()
+    writer.write(output)
+
+    reversed_pdf = output.getvalue()
+
+    if not reversed_pdf.startswith(b"%PDF-"):
+        raise ValueError(
+            "Не удалось подготовить PDF Ozon в обратном порядке."
+        )
+
+    return reversed_pdf
+
+
 def make_ozon_grouped_labels_pdf(
     groups: list[dict[str, Any]],
+    reverse_page_order: bool = False,
 ) -> bytes:
     """
     Создаёт общий PDF для печати Ozon FBS.
 
-    Порядок страниц:
+    Логический порядок группы:
 
     1. Служебная этикетка задания;
-    2. Оригинальная QR-этикетка или набор оригинальных QR-этикеток Ozon;
-    3. Следующее задание;
-    4. Следующие оригинальные QR-этикетки.
+    2. Оригинальная QR-этикетка либо набор QR-этикеток Ozon.
 
-    Формат одной группы:
-
-    ```python
-    {
-        "title": "NAKL_EXAMPLE",
-        "items": [("NAKL_EXAMPLE", 12)],
-        "posting_count": 5,
-        "label_pdfs": [b"%PDF-...", ...],
-    }
-    ```
-
-    Для многотоварного отправления `items` содержит несколько артикулов.
+    Если `reverse_page_order=True`, весь итоговый PDF разворачивается.
+    Это соответствует режиму «Для рулона — обратный порядок».
     """
     if not groups:
         raise ValueError(
@@ -618,11 +660,14 @@ def make_ozon_grouped_labels_pdf(
     output = BytesIO()
     writer.write(output)
 
-    result_pdf = output.getvalue()
+    normal_pdf = output.getvalue()
 
-    if not result_pdf.startswith(b"%PDF-"):
+    if not normal_pdf.startswith(b"%PDF-"):
         raise ValueError(
             "Не удалось подготовить итоговый PDF Ozon."
         )
 
-    return result_pdf
+    if not reverse_page_order:
+        return normal_pdf
+
+    return _reverse_pdf_page_order(normal_pdf)
