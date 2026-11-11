@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -8,7 +7,11 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from mysklad_api import MySkladApiError, MySkladClient
+from mysklad_api import (
+    FinishedProductsScope,
+    MySkladApiError,
+    MySkladClient,
+)
 
 
 DEFAULT_INCLUDED_STATUS_NAMES = (
@@ -17,9 +20,8 @@ DEFAULT_INCLUDED_STATUS_NAMES = (
     "Доставлено",
 )
 
-# В МоемСкладе `variant` — модификация физического товара.
-# Например: товар одного артикула с разным размером или цветом.
-# Такие позиции должны учитываться в количестве отгруженных штук.
+FINISHED_PRODUCTS_FOLDER_NAME = "Готовая продукция"
+
 PHYSICAL_ASSORTMENT_TYPES = {
     "product",
     "variant",
@@ -27,7 +29,7 @@ PHYSICAL_ASSORTMENT_TYPES = {
 
 
 def _value_to_date(value: object) -> date | None:
-    """Преобразует одиночное значение Streamlit в `date`."""
+    """Преобразует значение Streamlit в `date`."""
     if isinstance(value, datetime):
         return value.date()
 
@@ -86,24 +88,19 @@ def _format_date_range(
 
 
 def _parse_moment(value: object) -> datetime | None:
-    """
-    Преобразует `moment` документа МоегоСклада в datetime.
-
-    JSON API МоегоСклада обычно возвращает дату документа в формате:
-
-    `YYYY-MM-DD HH:MM:SS.mmm`
-    """
+    """Преобразует `moment` МоегоСклада в datetime."""
     if not isinstance(value, str) or not value.strip():
         return None
-
-    text = value.strip()
 
     for pattern in (
         "%Y-%m-%d %H:%M:%S.%f",
         "%Y-%m-%d %H:%M:%S",
     ):
         try:
-            return datetime.strptime(text, pattern)
+            return datetime.strptime(
+                value.strip(),
+                pattern,
+            )
         except ValueError:
             continue
 
@@ -121,19 +118,12 @@ def _format_moment(value: object) -> str:
 
 
 def _moment_sort_key(value: object) -> datetime:
-    """Возвращает безопасный ключ сортировки по дате документа."""
-    parsed = _parse_moment(value)
-
-    return parsed or datetime.min
+    """Возвращает безопасный ключ сортировки даты."""
+    return _parse_moment(value) or datetime.min
 
 
 def _state_id_from_meta(state: object) -> str:
-    """
-    Извлекает ID статуса из объекта статуса либо `meta.href`.
-
-    В разных ответах МоегоСклада статус может содержать явный `id`
-    или только ссылку в `meta.href`.
-    """
+    """Извлекает ID статуса из `id` либо `meta.href`."""
     if not isinstance(state, dict):
         return ""
 
@@ -147,18 +137,20 @@ def _state_id_from_meta(state: object) -> str:
     if not isinstance(meta, dict):
         return ""
 
+    meta_id = str(meta.get("id") or "").strip()
+
+    if meta_id:
+        return meta_id
+
     href = str(meta.get("href") or "").strip().rstrip("/")
 
-    if not href:
-        return ""
-
-    return href.rsplit("/", maxsplit=1)[-1]
+    return href.rsplit("/", maxsplit=1)[-1] if href else ""
 
 
 def _state_name_map(
     states: list[dict],
 ) -> dict[str, str]:
-    """Строит соответствие ID статуса и отображаемого названия."""
+    """Строит соответствие ID статуса и его названия."""
     result: dict[str, str] = {}
 
     for state in states:
@@ -166,26 +158,19 @@ def _state_name_map(
             continue
 
         state_id = _state_id_from_meta(state)
-
-        if not state_id:
-            continue
-
         state_name = str(state.get("name") or "").strip()
 
-        if not state_name:
+        if not state_id or not state_name:
             raise MySkladApiError(
-                "МойСклад вернул статус отгрузки без названия."
+                "МойСклад вернул некорректный статус отгрузки."
             )
 
         previous_name = result.get(state_id)
 
-        if (
-            previous_name is not None
-            and previous_name != state_name
-        ):
+        if previous_name and previous_name != state_name:
             raise MySkladApiError(
                 "МойСклад вернул один ID статуса отгрузки "
-                "с разными названиями. Отчёт не сформирован."
+                "с разными названиями."
             )
 
         result[state_id] = state_name
@@ -201,24 +186,17 @@ def _state_name_map(
 def _state_options_from_states(
     states: list[dict],
 ) -> list[dict[str, str]]:
-    """
-    Подготавливает статусы для `st.multiselect`.
-
-    Выбор хранит ID статуса, а не его название. Это защищает фильтр
-    от случайного совпадения или переименования статуса.
-    """
+    """Подготавливает статусы для `st.multiselect`."""
     state_names = _state_name_map(states)
 
-    options = [
-        {
-            "id": state_id,
-            "name": state_name,
-        }
-        for state_id, state_name in state_names.items()
-    ]
-
     return sorted(
-        options,
+        (
+            {
+                "id": state_id,
+                "name": state_name,
+            }
+            for state_id, state_name in state_names.items()
+        ),
         key=lambda row: (
             row["name"].casefold(),
             row["name"],
@@ -228,7 +206,7 @@ def _state_options_from_states(
 
 
 def _demand_state_id(demand: dict) -> str:
-    """Возвращает ID статуса из ответа документа «Отгрузка»."""
+    """Возвращает ID статуса отгрузки."""
     return _state_id_from_meta(demand.get("state"))
 
 
@@ -236,7 +214,7 @@ def _demand_status_name(
     demand: dict,
     state_names: dict[str, str],
 ) -> str:
-    """Возвращает отображаемое название статуса отгрузки."""
+    """Возвращает отображаемое название статуса."""
     state = demand.get("state")
 
     if not isinstance(state, dict):
@@ -249,13 +227,10 @@ def _demand_status_name(
 
     state_id = _demand_state_id(demand)
 
-    if state_id:
-        return state_names.get(
-            state_id,
-            "Статус не определён",
-        )
-
-    return "Без статуса"
+    return state_names.get(
+        state_id,
+        "Статус не определён",
+    )
 
 
 def _applicable_text(value: object) -> str:
@@ -270,51 +245,82 @@ def _applicable_text(value: object) -> str:
 
 
 def _require_demand_id(demand: dict) -> str:
-    """Получает UUID отгрузки из минимально нужных полей ответа."""
+    """Получает UUID отгрузки."""
     demand_id = str(demand.get("id") or "").strip()
 
     if not demand_id:
         raise MySkladApiError(
             "МойСклад вернул отгрузку без корректного ID. "
-            "Отчёт не сформирован, чтобы не потерять позиции документа."
+            "Отчёт не сформирован, чтобы не потерять позиции."
         )
 
     return demand_id
 
 
 def _demand_number(demand: dict) -> str:
-    """Возвращает номер отгрузки без данных покупателя."""
+    """Возвращает безопасный номер отгрузки."""
     number = str(demand.get("name") or "").strip()
 
     return number or "Без номера"
 
 
-def _physical_item_quantity(
+def _as_piece_quantity(
+    value: object,
+    demand_number: str,
+) -> int:
+    """Проверяет и возвращает целое неотрицательное количество."""
+    if isinstance(value, bool):
+        raise MySkladApiError(
+            "МойСклад вернул некорректное количество "
+            f"в отгрузке `{demand_number}`."
+        )
+
+    try:
+        quantity = Decimal(str(value))
+    except (
+        InvalidOperation,
+        TypeError,
+        ValueError,
+    ) as error:
+        raise MySkladApiError(
+            "МойСклад вернул некорректное количество "
+            f"в отгрузке `{demand_number}`."
+        ) from error
+
+    if not quantity.is_finite() or quantity < 0:
+        raise MySkladApiError(
+            "МойСклад вернул некорректное количество "
+            f"в отгрузке `{demand_number}`."
+        )
+
+    if quantity != quantity.to_integral_value():
+        raise MySkladApiError(
+            "МойСклад вернул дробное количество "
+            f"в отгрузке `{demand_number}`. "
+            "Отчёт учитывает только штучную готовую продукцию."
+        )
+
+    return int(quantity)
+
+
+def _position_kind_and_quantity(
+    client: MySkladClient,
+    scope: FinishedProductsScope,
     position: dict,
     demand_number: str,
-) -> tuple[int, str]:
+) -> tuple[str, int]:
     """
-    Проверяет позицию и возвращает количество физического товара.
+    Возвращает результат фильтрации позиции.
 
-    В расчёт включаются:
+    Возможные значения `kind`:
 
-    - `product` — товар;
-    - `variant` — модификация товара.
+    - `included_product`;
+    - `included_variant`;
+    - `outside_finished_products`;
+    - `unsupported_assortment_type`;
+    - `without_product_folder`.
 
-    В МоемСкладе модификация (`variant`) является физической
-    номенклатурой с собственным артикулом, поэтому её quantity нужно
-    считать наравне с обычным товаром.
-
-    Расчёт останавливается для:
-
-    - `service`;
-    - `bundle`;
-    - `consignment`;
-    - неизвестного типа;
-    - дробного или отрицательного количества.
-
-    Это исключает смешивание штук товаров с услугами, комплектами
-    и другими несопоставимыми сущностями.
+    В итоговое количество попадают только первые два варианта.
     """
     assortment = position.get("assortment")
 
@@ -328,70 +334,40 @@ def _physical_item_quantity(
 
     if not isinstance(meta, dict):
         raise MySkladApiError(
-            "МойСклад вернул номенклатуру позиции без `meta` "
-            f"в документе `{demand_number}`."
+            "МойСклад вернул номенклатуру без `meta` "
+            f"в отгрузке `{demand_number}`."
         )
 
     assortment_type = str(meta.get("type") or "").strip()
+    quantity = _as_piece_quantity(
+        value=position.get("quantity"),
+        demand_number=demand_number,
+    )
 
     if assortment_type not in PHYSICAL_ASSORTMENT_TYPES:
-        shown_type = assortment_type or "не определён"
+        return "unsupported_assortment_type", quantity
 
-        raise MySkladApiError(
-            "В отгрузке найден тип номенклатуры, который нельзя "
-            "считать как штучный физический товар: "
-            f"`{shown_type}` в документе `{demand_number}`. "
-            "Отчёт не сформирован, чтобы не смешать товары и "
-            "модификации с услугами, комплектами или партиями."
-        )
+    folder_id = client.assortment_product_folder_id(
+        assortment=assortment
+    )
 
-    quantity_value = position.get("quantity")
+    if not folder_id:
+        return "without_product_folder", quantity
 
-    if isinstance(quantity_value, bool):
-        raise MySkladApiError(
-            "МойСклад вернул некорректное количество товара "
-            f"в отгрузке `{demand_number}`."
-        )
+    if folder_id not in scope.included_folder_ids:
+        return "outside_finished_products", quantity
 
-    try:
-        quantity = Decimal(str(quantity_value))
-    except (
-        InvalidOperation,
-        TypeError,
-        ValueError,
-    ) as error:
-        raise MySkladApiError(
-            "МойСклад вернул некорректное количество товара "
-            f"в отгрузке `{demand_number}`."
-        ) from error
+    if assortment_type == "product":
+        return "included_product", quantity
 
-    if not quantity.is_finite():
-        raise MySkladApiError(
-            "МойСклад вернул некорректное количество товара "
-            f"в отгрузке `{demand_number}`."
-        )
-
-    if quantity < 0:
-        raise MySkladApiError(
-            "МойСклад вернул отрицательное количество товара "
-            f"в отгрузке `{demand_number}`."
-        )
-
-    if quantity != quantity.to_integral_value():
-        raise MySkladApiError(
-            "МойСклад вернул дробное количество товара "
-            f"в отгрузке `{demand_number}`. "
-            "Отчёт поддерживает только целые штуки."
-        )
-
-    return int(quantity), assortment_type
+    return "included_variant", quantity
 
 
 def _validate_selected_state_ids(
     selected_state_ids: set[str],
     state_names: dict[str, str],
 ) -> set[str]:
-    """Проверяет, что выбранные статусы существуют в метаданных."""
+    """Проверяет выбранные статусы."""
     normalized_ids = {
         str(state_id).strip()
         for state_id in selected_state_ids
@@ -407,8 +383,7 @@ def _validate_selected_state_ids(
 
     if unknown_ids:
         raise MySkladApiError(
-            "Выбран один или несколько статусов, которых больше нет "
-            "в актуальных метаданных МоегоСклада. "
+            "Выбран один или несколько неактуальных статусов. "
             "Обновите список статусов и повторите расчёт."
         )
 
@@ -422,24 +397,22 @@ def build_mysklad_shipment_report(
     selected_state_ids: set[str],
 ) -> dict[str, Any]:
     """
-    Формирует read-only отчёт по товарам выбранных статусов отгрузок.
+    Формирует read-only отчёт по отгрузкам.
 
-    Алгоритм:
+    В расчёт включаются только `product` и `variant`, относящиеся
+    к разделу «Готовая продукция» либо к его дочерним разделам.
 
-    1. Получает актуальные статусы отгрузок.
-    2. Получает отгрузки с `moment` в выбранном периоде.
-    3. Оставляет только документы выбранных статусов.
-    4. Загружает позиции только включённых документов.
-    5. Считает quantity физической номенклатуры типов:
-       `product` и `variant`.
-
-    Отгрузки иных статусов не запрашиваются по позициям, поэтому
-    лишние обращения к API не выполняются.
+    Расходники, гофрокороба, этикет-лента, услуги, комплекты и позиции
+    вне дерева готовой продукции не участвуют в итоговом количестве.
     """
     if date_from > date_to:
         raise ValueError(
             "Дата начала периода не может быть позже даты окончания."
         )
+
+    scope = client.finished_products_scope(
+        root_folder_name=FINISHED_PRODUCTS_FOLDER_NAME
+    )
 
     demand_states = client.demand_states()
     state_names = _state_name_map(demand_states)
@@ -454,36 +427,49 @@ def build_mysklad_shipment_report(
         date_to=date_to,
     )
 
-    status_totals: dict[str, dict[str, int | str]] = {}
-
-    for state_id in normalized_selected_ids:
-        status_totals[state_id] = {
+    status_totals: dict[str, dict[str, int | str]] = {
+        state_id: {
             "Статус отгрузки": state_names[state_id],
             "Документов": 0,
+            "Отгрузок с готовой продукцией": 0,
             "Проведено документов": 0,
             "Непроведено документов": 0,
             "Не определено проведение": 0,
-            "Товарных позиций": 0,
+            "Позиций готовой продукции": 0,
             "Позиций product": 0,
             "Позиций variant": 0,
-            "Количество товара": 0,
+            "Исключено позиций": 0,
+            "Количество готовой продукции": 0,
         }
+        for state_id in normalized_selected_ids
+    }
 
     seen_demand_ids: set[str] = set()
     document_rows: list[dict] = []
 
-    total_positions = 0
-    total_product_positions = 0
-    total_variant_positions = 0
-    total_quantity = 0
+    total_documents_in_period = 0
+    excluded_by_status_count = 0
+    documents_without_status_count = 0
+
+    total_documents = 0
+    documents_with_finished_products = 0
+    documents_without_finished_products = 0
 
     total_applicable_documents = 0
     total_not_applicable_documents = 0
     total_unknown_applicable_documents = 0
 
-    total_documents_in_period = 0
-    excluded_by_status_count = 0
-    documents_without_status_count = 0
+    total_source_positions = 0
+    total_included_positions = 0
+    total_product_positions = 0
+    total_variant_positions = 0
+    total_excluded_positions = 0
+    total_outside_finished_positions = 0
+    total_without_folder_positions = 0
+    total_unsupported_positions = 0
+
+    total_quantity = 0
+    total_excluded_quantity = 0
 
     for demand in demands:
         if not isinstance(demand, dict):
@@ -493,7 +479,7 @@ def build_mysklad_shipment_report(
 
         if demand_id in seen_demand_ids:
             raise MySkladApiError(
-                "МойСклад вернул одну и ту же отгрузку повторно. "
+                "МойСклад вернул одну отгрузку повторно. "
                 "Отчёт не сформирован, чтобы исключить двойной учёт."
             )
 
@@ -517,17 +503,18 @@ def build_mysklad_shipment_report(
             state_names=state_names,
         )
 
-        applicable_value = demand.get("applicable")
-        applicable_text = _applicable_text(applicable_value)
-
         positions = client.demand_positions(
-            demand_id=demand_id
+            demand_id=demand_id,
+            expand_assortment=True,
         )
 
-        document_position_count = 0
+        document_source_positions = 0
+        document_included_positions = 0
         document_product_positions = 0
         document_variant_positions = 0
+        document_excluded_positions = 0
         document_quantity = 0
+        document_excluded_quantity = 0
 
         for position in positions:
             if not isinstance(position, dict):
@@ -536,18 +523,36 @@ def build_mysklad_shipment_report(
                     f"в отгрузке `{demand_number}`."
                 )
 
-            quantity, assortment_type = _physical_item_quantity(
+            kind, quantity = _position_kind_and_quantity(
+                client=client,
+                scope=scope,
                 position=position,
                 demand_number=demand_number,
             )
 
-            document_position_count += 1
-            document_quantity += quantity
+            document_source_positions += 1
 
-            if assortment_type == "product":
+            if kind == "included_product":
+                document_included_positions += 1
                 document_product_positions += 1
-            else:
+                document_quantity += quantity
+                continue
+
+            if kind == "included_variant":
+                document_included_positions += 1
                 document_variant_positions += 1
+                document_quantity += quantity
+                continue
+
+            document_excluded_positions += 1
+            document_excluded_quantity += quantity
+
+            if kind == "outside_finished_products":
+                total_outside_finished_positions += 1
+            elif kind == "without_product_folder":
+                total_without_folder_positions += 1
+            else:
+                total_unsupported_positions += 1
 
         status_total = status_totals[state_id]
 
@@ -555,9 +560,9 @@ def build_mysklad_shipment_report(
             int(status_total["Документов"]) + 1
         )
 
-        status_total["Товарных позиций"] = (
-            int(status_total["Товарных позиций"])
-            + document_position_count
+        status_total["Позиций готовой продукции"] = (
+            int(status_total["Позиций готовой продукции"])
+            + document_included_positions
         )
 
         status_total["Позиций product"] = (
@@ -570,33 +575,55 @@ def build_mysklad_shipment_report(
             + document_variant_positions
         )
 
-        status_total["Количество товара"] = (
-            int(status_total["Количество товара"])
+        status_total["Исключено позиций"] = (
+            int(status_total["Исключено позиций"])
+            + document_excluded_positions
+        )
+
+        status_total["Количество готовой продукции"] = (
+            int(status_total["Количество готовой продукции"])
             + document_quantity
         )
+
+        if document_included_positions > 0:
+            status_total["Отгрузок с готовой продукцией"] = (
+                int(
+                    status_total[
+                        "Отгрузок с готовой продукцией"
+                    ]
+                )
+                + 1
+            )
+            documents_with_finished_products += 1
+        else:
+            documents_without_finished_products += 1
+
+        applicable_value = demand.get("applicable")
 
         if applicable_value is True:
             status_total["Проведено документов"] = (
                 int(status_total["Проведено документов"]) + 1
             )
             total_applicable_documents += 1
-
         elif applicable_value is False:
             status_total["Непроведено документов"] = (
                 int(status_total["Непроведено документов"]) + 1
             )
             total_not_applicable_documents += 1
-
         else:
             status_total["Не определено проведение"] = (
                 int(status_total["Не определено проведение"]) + 1
             )
             total_unknown_applicable_documents += 1
 
-        total_positions += document_position_count
+        total_documents += 1
+        total_source_positions += document_source_positions
+        total_included_positions += document_included_positions
         total_product_positions += document_product_positions
         total_variant_positions += document_variant_positions
+        total_excluded_positions += document_excluded_positions
         total_quantity += document_quantity
+        total_excluded_quantity += document_excluded_quantity
 
         document_rows.append(
             {
@@ -609,22 +636,26 @@ def build_mysklad_shipment_report(
                 "Отгрузка": demand_number,
                 "ID отгрузки": demand_id,
                 "Статус": status_name,
-                "Проведена": applicable_text,
-                "Товарных позиций": document_position_count,
+                "Проведена": _applicable_text(
+                    applicable_value
+                ),
+                "Позиций готовой продукции": (
+                    document_included_positions
+                ),
                 "Позиций product": document_product_positions,
                 "Позиций variant": document_variant_positions,
-                "Количество товара": document_quantity,
+                "Исключено позиций": document_excluded_positions,
+                "Количество готовой продукции": document_quantity,
             }
         )
 
-    status_rows = list(status_totals.values())
-
-    status_rows.sort(
+    status_rows = sorted(
+        status_totals.values(),
         key=lambda row: (
-            -int(row["Количество товара"]),
+            -int(row["Количество готовой продукции"]),
             str(row["Статус отгрузки"]).casefold(),
             str(row["Статус отгрузки"]),
-        )
+        ),
     )
 
     document_rows.sort(
@@ -656,6 +687,8 @@ def build_mysklad_shipment_report(
         "date_from": date_from,
         "date_to": date_to,
         "generated_at": datetime.now(),
+        "finished_products_folder_name": scope.root_folder_name,
+        "finished_products_folder_count": scope.folder_count,
         "selected_state_ids": sorted(normalized_selected_ids),
         "selected_status_names": selected_status_names,
         "available_state_options": _state_options_from_states(
@@ -666,7 +699,13 @@ def build_mysklad_shipment_report(
         "documents_without_status_count": (
             documents_without_status_count
         ),
-        "total_documents": len(document_rows),
+        "total_documents": total_documents,
+        "documents_with_finished_products": (
+            documents_with_finished_products
+        ),
+        "documents_without_finished_products": (
+            documents_without_finished_products
+        ),
         "total_applicable_documents": total_applicable_documents,
         "total_not_applicable_documents": (
             total_not_applicable_documents
@@ -674,179 +713,95 @@ def build_mysklad_shipment_report(
         "total_unknown_applicable_documents": (
             total_unknown_applicable_documents
         ),
-        "total_positions": total_positions,
+        "total_source_positions": total_source_positions,
+        "total_included_positions": total_included_positions,
         "total_product_positions": total_product_positions,
         "total_variant_positions": total_variant_positions,
+        "total_excluded_positions": total_excluded_positions,
+        "total_outside_finished_positions": (
+            total_outside_finished_positions
+        ),
+        "total_without_folder_positions": (
+            total_without_folder_positions
+        ),
+        "total_unsupported_positions": total_unsupported_positions,
         "total_quantity": total_quantity,
+        "total_excluded_quantity": total_excluded_quantity,
         "status_rows": status_rows,
         "document_rows": document_rows,
     }
 
 
-def _render_status_table(
-    rows: list[dict],
-) -> None:
+def _render_status_table(rows: list[dict]) -> None:
     """Показывает сводку по выбранным статусам."""
     columns = [
         "Статус отгрузки",
         "Документов",
+        "Отгрузок с готовой продукцией",
         "Проведено документов",
         "Непроведено документов",
         "Не определено проведение",
-        "Товарных позиций",
+        "Позиций готовой продукции",
         "Позиций product",
         "Позиций variant",
-        "Количество товара",
+        "Исключено позиций",
+        "Количество готовой продукции",
     ]
 
-    table = pd.DataFrame(
-        rows,
-        columns=columns,
-    )
-
     st.dataframe(
-        table,
+        pd.DataFrame(rows, columns=columns),
         use_container_width=True,
         hide_index=True,
-        column_config={
-            "Статус отгрузки": st.column_config.TextColumn(
-                "Статус отгрузки",
-                width="large",
-            ),
-            "Документов": st.column_config.NumberColumn(
-                "Документов",
-                format="%d",
-            ),
-            "Проведено документов": st.column_config.NumberColumn(
-                "Проведено документов",
-                format="%d",
-            ),
-            "Непроведено документов": st.column_config.NumberColumn(
-                "Непроведено документов",
-                format="%d",
-            ),
-            "Не определено проведение": st.column_config.NumberColumn(
-                "Не определено проведение",
-                format="%d",
-            ),
-            "Товарных позиций": st.column_config.NumberColumn(
-                "Товарных позиций",
-                format="%d",
-            ),
-            "Позиций product": st.column_config.NumberColumn(
-                "Позиций product",
-                format="%d",
-            ),
-            "Позиций variant": st.column_config.NumberColumn(
-                "Позиций variant",
-                format="%d",
-            ),
-            "Количество товара": st.column_config.NumberColumn(
-                "Количество товара",
-                format="%d",
-            ),
-        },
     )
 
 
-def _render_document_table(
-    rows: list[dict],
-) -> None:
-    """
-    Показывает отгрузки, вошедшие в расчёт.
-
-    Таблица не содержит покупателей, контрагентов, адресов, телефонов
-    и иных персональных данных.
-    """
+def _render_document_table(rows: list[dict]) -> None:
+    """Показывает отгрузки выбранных статусов."""
     columns = [
         "Дата документа",
         "Отгрузка",
         "ID отгрузки",
         "Статус",
         "Проведена",
-        "Товарных позиций",
+        "Позиций готовой продукции",
         "Позиций product",
         "Позиций variant",
-        "Количество товара",
+        "Исключено позиций",
+        "Количество готовой продукции",
     ]
 
-    table = pd.DataFrame(
-        rows,
-        columns=columns,
-    )
-
     st.dataframe(
-        table,
+        pd.DataFrame(rows, columns=columns),
         use_container_width=True,
         hide_index=True,
-        column_config={
-            "Дата документа": st.column_config.TextColumn(
-                "Дата документа",
-                width="medium",
-            ),
-            "Отгрузка": st.column_config.TextColumn(
-                "Отгрузка",
-                width="medium",
-            ),
-            "ID отгрузки": st.column_config.TextColumn(
-                "ID отгрузки",
-                width="large",
-            ),
-            "Статус": st.column_config.TextColumn(
-                "Статус",
-                width="large",
-            ),
-            "Проведена": st.column_config.TextColumn(
-                "Проведена",
-                width="small",
-            ),
-            "Товарных позиций": st.column_config.NumberColumn(
-                "Товарных позиций",
-                format="%d",
-            ),
-            "Позиций product": st.column_config.NumberColumn(
-                "Позиций product",
-                format="%d",
-            ),
-            "Позиций variant": st.column_config.NumberColumn(
-                "Позиций variant",
-                format="%d",
-            ),
-            "Количество товара": st.column_config.NumberColumn(
-                "Количество товара",
-                format="%d",
-            ),
-        },
     )
 
 
-def _render_result(
-    result: dict[str, Any],
-) -> None:
-    """Отображает результат расчёта по выбранным статусам."""
+def _render_result(result: dict[str, Any]) -> None:
+    """Отображает результат отчёта."""
     st.divider()
-    st.subheader("📊 Количество товара по выбранным статусам")
+    st.subheader("📊 Готовая продукция в отгрузках")
 
     metric_1, metric_2, metric_3, metric_4 = st.columns(4)
 
     metric_1.metric(
-        "Отгрузок по фильтру",
+        "Отгрузок по статусам",
         result["total_documents"],
     )
 
     metric_2.metric(
-        "Товарных позиций",
-        result["total_positions"],
+        "Отгрузок с готовой продукцией",
+        result["documents_with_finished_products"],
     )
 
     metric_3.metric(
-        "Количество товара",
+        "Количество готовой продукции",
         result["total_quantity"],
     )
 
     metric_4.metric(
-        "Позиций variant",
-        result["total_variant_positions"],
+        "Исключено позиций",
+        result["total_excluded_positions"],
     )
 
     metric_5, metric_6, metric_7, metric_8 = st.columns(4)
@@ -857,18 +812,18 @@ def _render_result(
     )
 
     metric_6.metric(
-        "Непроведено документов",
-        result["total_not_applicable_documents"],
-    )
-
-    metric_7.metric(
         "Позиций product",
         result["total_product_positions"],
     )
 
+    metric_7.metric(
+        "Позиций variant",
+        result["total_variant_positions"],
+    )
+
     metric_8.metric(
-        "Исключено по статусу",
-        result["excluded_by_status_count"],
+        "Без готовой продукции",
+        result["documents_without_finished_products"],
     )
 
     st.caption(
@@ -877,32 +832,34 @@ def _render_result(
     )
 
     st.caption(
-        "Выбранные статусы: "
-        + ", ".join(
-            f"`{name}`"
-            for name in result["selected_status_names"]
-        )
-        + "."
+        "Учитывается только дерево товарных групп "
+        f"`{result['finished_products_folder_name']}`: "
+        f"корневая группа и вложенные разделы — "
+        f"**{result['finished_products_folder_count']}** групп."
     )
+
+    st.success(
+        "Расходники, этикет-лента, гофрокороба, позиции вне "
+        "«Готовой продукции», услуги и комплекты не входят "
+        "в количество готовой продукции."
+    )
+
+    if result["total_without_folder_positions"] > 0:
+        st.warning(
+            "Найдено позиций без товарной группы: "
+            f"**{result['total_without_folder_positions']}**. "
+            "Они исключены из расчёта, чтобы не включить "
+            "неопределённую номенклатуру."
+        )
 
     st.caption(
-        "В расчёт входят физические позиции номенклатуры типов "
-        "`product` и `variant`. `variant` — модификация товара "
-        "в МоемСкладе, например товар другого размера, цвета или версии."
+        "Причины исключения позиций: вне дерева готовой продукции — "
+        f"**{result['total_outside_finished_positions']}**; "
+        "без товарной группы — "
+        f"**{result['total_without_folder_positions']}**; "
+        "неподдерживаемый тип номенклатуры — "
+        f"**{result['total_unsupported_positions']}**."
     )
-
-    st.caption(
-        "Всего документов с `moment` в периоде: "
-        f"**{result['total_documents_in_period']}**. "
-        "Позиции документов других статусов не запрашиваются."
-    )
-
-    if result["documents_without_status_count"] > 0:
-        st.info(
-            "В периоде найдено документов без статуса: "
-            f"**{result['documents_without_status_count']}**. "
-            "Они не входят в расчёт, пока не будет назначен статус."
-        )
 
     st.divider()
     st.subheader("📌 Сводка по статусам")
@@ -910,7 +867,7 @@ def _render_result(
     _render_status_table(result["status_rows"])
 
     st.divider()
-    st.subheader("📄 Отгрузки, вошедшие в расчёт")
+    st.subheader("📄 Отгрузки выбранных статусов")
 
     if not result["document_rows"]:
         st.info(
@@ -919,16 +876,11 @@ def _render_result(
         )
         return
 
-    st.caption(
-        "Таблица содержит только безопасные служебные поля документов "
-        "и агрегаты товарных позиций."
-    )
-
     _render_document_table(result["document_rows"])
 
 
 def _get_mysklad_token() -> str:
-    """Безопасно читает токен МоегоСклада из Streamlit Secrets."""
+    """Безопасно читает токен МоегоСклада."""
     try:
         return str(
             st.secrets["MYSKLAD_API_TOKEN"]
@@ -938,17 +890,17 @@ def _get_mysklad_token() -> str:
 
 
 def _get_cached_status_options() -> list[dict[str, str]]:
-    """Возвращает ранее загруженный список статусов отгрузок."""
-    value = st.session_state.get(
+    """Возвращает ранее загруженные статусы."""
+    raw_value = st.session_state.get(
         "mysklad_shipment_status_options"
     )
 
-    if not isinstance(value, list):
+    if not isinstance(raw_value, list):
         return []
 
     result: list[dict[str, str]] = []
 
-    for item in value:
+    for item in raw_value:
         if not isinstance(item, dict):
             continue
 
@@ -969,107 +921,69 @@ def _get_cached_status_options() -> list[dict[str, str]]:
 def _default_selected_status_ids(
     options: list[dict[str, str]],
 ) -> list[str]:
-    """
-    Возвращает ID важных статусов по умолчанию.
-
-    По текущему согласованному процессу включаются:
-
-    - Отгружено;
-    - Принято на МП;
-    - Доставлено.
-    """
-    default_names = {
-        name.casefold()
-        for name in DEFAULT_INCLUDED_STATUS_NAMES
+    """Возвращает ID статусов по умолчанию."""
+    target_names = {
+        value.casefold()
+        for value in DEFAULT_INCLUDED_STATUS_NAMES
     }
 
     return [
         option["id"]
         for option in options
-        if option["name"].casefold() in default_names
+        if option["name"].casefold() in target_names
     ]
 
 
 def _prepare_status_selection_state(
     options: list[dict[str, str]],
 ) -> None:
-    """
-    Инициализирует или обновляет пользовательский выбор статусов.
-
-    При первой загрузке выбираются важные статусы по умолчанию.
-    При последующем обновлении сохраняется существующий выбор,
-    если статусы всё ещё доступны.
-    """
+    """Инициализирует либо обновляет сохранённый выбор статусов."""
     option_ids = {
         option["id"]
         for option in options
     }
 
-    selection_key = (
-        "mysklad_shipment_selected_state_ids"
-    )
-
+    selection_key = "mysklad_shipment_selected_state_ids"
     initialized_key = (
         "mysklad_shipment_status_selection_initialized"
     )
 
-    raw_selected = st.session_state.get(
-        selection_key,
-        [],
-    )
+    raw_selected = st.session_state.get(selection_key, [])
 
     if not isinstance(raw_selected, list):
         raw_selected = []
 
     valid_selected = [
-        str(state_id).strip()
-        for state_id in raw_selected
-        if str(state_id).strip() in option_ids
+        str(value).strip()
+        for value in raw_selected
+        if str(value).strip() in option_ids
     ]
 
-    is_initialized = bool(
-        st.session_state.get(initialized_key, False)
-    )
-
-    if not is_initialized:
-        valid_selected = _default_selected_status_ids(
-            options
-        )
+    if not st.session_state.get(initialized_key, False):
+        valid_selected = _default_selected_status_ids(options)
         st.session_state[initialized_key] = True
 
     st.session_state[selection_key] = valid_selected
 
 
 def render_mysklad_shipments_tab() -> None:
-    """
-    Отображает вкладку количества товара в отгрузках МоегоСклада.
-
-    Все обращения к API выполняются только через GET-запросы.
-    Приложение не создаёт, не проводит, не изменяет и не удаляет
-    документы, статусы или позиции.
-    """
+    """Отображает вкладку отгрузок МоегоСклада."""
     st.title("📊 Отгрузки МоегоСклада")
 
     st.markdown(
         """
         <div class="description-box">
-            Выберите период по дате документа отгрузки <code>moment</code>
-            и один или несколько статусов. Приложение посчитает
-            количество физического товара только в отгрузках выбранных
-            статусов.
+            Выберите период и статусы отгрузок. В итоговое количество
+            попадут только товары из раздела <b>«Готовая продукция»</b>
+            и его вложенных групп.
         </div>
         """,
         unsafe_allow_html=True,
     )
 
     st.caption(
-        "По умолчанию выбраны статусы: `Отгружено`, "
-        "`Принято на МП`, `Доставлено`."
-    )
-
-    st.caption(
-        "Учитываются физические позиции типов `product` и `variant`. "
-        "Модификация `variant` считается товаром, а не ошибкой."
+        "Расходники, этикет-лента, гофрокороба и прочие товары вне "
+        "раздела «Готовая продукция» исключаются автоматически."
     )
 
     mysklad_token = _get_mysklad_token()
@@ -1085,7 +999,7 @@ def render_mysklad_shipments_tab() -> None:
 
     today = datetime.now().date()
 
-    date_col, status_load_col = st.columns([2, 1])
+    date_col, status_col = st.columns([2, 1])
 
     with date_col:
         selected_date_range = st.date_input(
@@ -1093,13 +1007,9 @@ def render_mysklad_shipments_tab() -> None:
             value=(today, today),
             format="DD.MM.YYYY",
             key="mysklad_shipment_report_date_range",
-            help=(
-                "Фильтруется поле `moment`: дата документа отгрузки "
-                "МоегоСклада, а не дата создания или обновления."
-            ),
         )
 
-    with status_load_col:
+    with status_col:
         st.markdown("<br>", unsafe_allow_html=True)
 
         load_statuses_clicked = st.button(
@@ -1113,8 +1023,7 @@ def render_mysklad_shipments_tab() -> None:
 
         try:
             with st.spinner(
-                "Загружаю доступные статусы отгрузок "
-                "МоегоСклада…"
+                "Загружаю доступные статусы отгрузок…"
             ):
                 options = _state_options_from_states(
                     client.demand_states()
@@ -1140,17 +1049,14 @@ def render_mysklad_shipments_tab() -> None:
     )
 
     if date_from is None or date_to is None:
-        st.warning(
-            "Выберите одну дату или полный диапазон дат."
-        )
+        st.warning("Выберите дату или полный диапазон дат.")
         return
 
     status_options = _get_cached_status_options()
 
     if not status_options:
         st.info(
-            "Нажмите «Загрузить статусы», затем выберите статусы "
-            "отгрузок для расчёта."
+            "Нажмите «Загрузить статусы», затем выберите статусы."
         )
         return
 
@@ -1175,23 +1081,7 @@ def render_mysklad_shipments_tab() -> None:
             state_id
         ],
         key="mysklad_shipment_selected_state_ids",
-        placeholder="Выберите один или несколько статусов",
-        help=(
-            "Можно выбрать одновременно несколько статусов. "
-            "В расчёт войдут только документы с выбранными статусами."
-        ),
-    )
-
-    if not selected_state_ids:
-        st.warning(
-            "Выберите хотя бы один статус отгрузки."
-        )
-
-    st.caption(
-        "Период: "
-        f"**{_format_date_range(date_from, date_to)}**. "
-        "Выбор статусов применяется к документам отгрузки, "
-        "найденным по `moment`."
+        placeholder="Выберите статусы",
     )
 
     result_signature = (
@@ -1211,10 +1101,9 @@ def render_mysklad_shipments_tab() -> None:
         st.session_state[
             "mysklad_shipment_report_result"
         ] = None
-        saved = None
 
     update_clicked = st.button(
-        "🔄 Посчитать количество по выбранным статусам",
+        "🔄 Посчитать готовую продукцию",
         type="primary",
         use_container_width=True,
         key="update_mysklad_shipment_report",
@@ -1222,16 +1111,12 @@ def render_mysklad_shipments_tab() -> None:
     )
 
     if update_clicked:
-        st.session_state[
-            "mysklad_shipment_report_result"
-        ] = None
-
         client = MySkladClient(token=mysklad_token)
 
         try:
             with st.spinner(
-                "Получаю отгрузки за период и товарные позиции "
-                "выбранных статусов…"
+                "Получаю отгрузки, товарные группы и позиции "
+                "готовой продукции…"
             ):
                 result = build_mysklad_shipment_report(
                     client=client,
@@ -1252,7 +1137,7 @@ def render_mysklad_shipments_tab() -> None:
             }
 
             st.success(
-                "Количество товара по выбранным статусам обновлено."
+                "Отчёт по готовой продукции сформирован."
             )
 
         except (MySkladApiError, ValueError) as error:
@@ -1267,8 +1152,7 @@ def render_mysklad_shipments_tab() -> None:
         or saved.get("signature") != result_signature
     ):
         st.info(
-            "Выберите период и статусы, затем нажмите "
-            "«Посчитать количество по выбранным статусам»."
+            "Выберите период и статусы, затем запустите расчёт."
         )
         return
 
