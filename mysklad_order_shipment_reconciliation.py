@@ -487,15 +487,50 @@ def _catalog_label(
     demand_id: str,
     catalog_by_demand_id: dict[str, dict],
 ) -> str:
-    """Формирует подпись отгрузки в мультивыборе."""
+    """Формирует безопасную подпись FBO-отгрузки для выбора."""
     row = catalog_by_demand_id[demand_id]
 
+    marketplace = str(
+        row.get("marketplace") or ""
+    ).strip()
+
+    counterparty_name = str(
+        row.get("counterparty_name") or ""
+    ).strip()
+
+    order_number = str(
+        row.get("order_number") or ""
+    ).strip()
+
+    demand_number = str(
+        row.get("demand_number") or ""
+    ).strip()
+
+    demand_moment = str(
+        row.get("demand_moment") or ""
+    ).strip()
+
+    if not marketplace:
+        marketplace = "Маркетплейс не определён"
+
+    if not counterparty_name:
+        counterparty_name = "Контрагент не определён"
+
+    if not order_number:
+        order_number = "Без номера"
+
+    if not demand_number:
+        demand_number = "Без номера"
+
+    if not demand_moment:
+        demand_moment = "Дата не определена"
+
     return (
-        f"{row['Маркетплейс']}  |  "
-        f"{row['Контрагент']}  |  "
-        f"заказ {row['Заказ']}  |  "
-        f"отгрузка {row['Отгрузка']}  |  "
-        f"{row['Дата отгрузки']}"
+        f"{marketplace}  |  "
+        f"{counterparty_name}  |  "
+        f"заказ {order_number}  |  "
+        f"отгрузка {demand_number}  |  "
+        f"{demand_moment}"
     )
 
 
