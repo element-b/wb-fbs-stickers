@@ -37,10 +37,9 @@ class MySkladApiError(RuntimeError):
 @dataclass(frozen=True)
 class FinishedProductsScope:
     """
-    Безопасно определённое дерево товарных групп готовой продукции.
+    Дерево товарных групп готовой продукции.
 
-    Включает корневую группу «Готовая продукция» и все её дочерние
-    товарные группы.
+    Включает корневую товарную группу и все её дочерние группы.
     """
 
     root_folder_id: str
@@ -49,12 +48,12 @@ class FinishedProductsScope:
 
     @property
     def folder_count(self) -> int:
-        """Возвращает число включённых товарных групп."""
+        """Возвращает количество групп в дереве."""
         return len(self.included_folder_ids)
 
 
 def _as_number(value: object) -> float:
-    """Преобразует значение API МоегоСклада в число."""
+    """Преобразует значение API в число."""
     try:
         return float(value)
     except (TypeError, ValueError) as error:
@@ -64,12 +63,7 @@ def _as_number(value: object) -> float:
 
 
 def _to_piece_count(value: float) -> int:
-    """
-    Преобразует остаток в число штук.
-
-    Положительные дробные значения округляются вниз, чтобы план
-    не показывал больше готовой продукции, чем есть фактически.
-    """
+    """Преобразует остаток в целое количество штук."""
     if value >= 0:
         return int(math.floor(value))
 
@@ -77,11 +71,7 @@ def _to_piece_count(value: float) -> int:
 
 
 def _entity_id(value: object) -> str:
-    """
-    Извлекает UUID сущности из `id` либо `meta.href`.
-
-    Используется только для данных, возвращённых API МоегоСклада.
-    """
+    """Извлекает UUID из поля id либо meta.href."""
     if not isinstance(value, dict):
         return ""
 
@@ -112,17 +102,8 @@ class MySkladClient:
     """
     Read-only клиент JSON API МоегоСклада 1.2.
 
-    Использует только GET-запросы:
-
-    - склады и остатки;
-    - метаданные статусов;
-    - заказы покупателей;
-    - отгрузки;
-    - позиции заказов и отгрузок;
-    - группы товаров;
-    - товары и модификации только для определения их товарной группы.
-
-    Клиент не создаёт, не изменяет, не проводит и не удаляет документы.
+    Использует только GET-запросы. Не создаёт, не редактирует,
+    не проводит и не удаляет документы, позиции, статусы и остатки.
     """
 
     def __init__(
@@ -142,8 +123,6 @@ class MySkladClient:
         self.retries = retries
         self._last_request_at = 0.0
 
-        # Кэш определённой товарной группы номенклатуры:
-        # ключ: `<тип>:<UUID>`, значение: UUID productFolder либо "".
         self._assortment_folder_cache: dict[str, str] = {}
 
         self.session = requests.Session()
@@ -156,7 +135,7 @@ class MySkladClient:
         )
 
     def _wait_for_rate_limit(self) -> None:
-        """Выдерживает безопасный интервал между запросами."""
+        """Выдерживает интервал между запросами."""
         elapsed = time.monotonic() - self._last_request_at
         delay = MIN_REQUEST_INTERVAL_SECONDS - elapsed
 
@@ -168,7 +147,7 @@ class MySkladClient:
         response: requests.Response,
         attempt: int,
     ) -> float:
-        """Определяет задержку перед повтором запроса."""
+        """Определяет задержку перед повторной попыткой."""
         retry_after = (
             response.headers.get("X-Lognex-Retry-After")
             or response.headers.get("Retry-After")
@@ -191,10 +170,9 @@ class MySkladClient:
         params: dict[str, object] | None = None,
     ) -> dict:
         """
-        Выполняет GET-запрос с ограниченными безопасными повторами.
+        Выполняет безопасный GET-запрос.
 
-        Тело ответа, токен и Authorization-заголовок не выводятся
-        в интерфейс и не логируются.
+        Полный ответ API, Authorization-заголовок и токен не выводятся.
         """
         url = f"{BASE_URL}{path}"
 
@@ -207,6 +185,7 @@ class MySkladClient:
                     params=params,
                     timeout=self.timeout,
                 )
+
                 self._last_request_at = time.monotonic()
 
             except requests.RequestException:
@@ -223,7 +202,7 @@ class MySkladClient:
             if response.status_code in (401, 403):
                 raise MySkladApiError(
                     "МойСклад отказал в доступе. Проверьте токен "
-                    "и права просмотра заказов, отгрузок, товаров "
+                    "и права просмотра отгрузок, заказов, товаров "
                     "и товарных групп.",
                     status=response.status_code,
                 )
@@ -276,10 +255,9 @@ class MySkladClient:
         page_limit: int | None = None,
     ) -> list[dict]:
         """
-        Получает все строки через пагинацию `limit` / `offset`.
+        Получает все строки с пагинацией `limit` / `offset`.
 
-        Для обычных запросов используется до 1000 строк на страницу.
-        Для запросов с `expand` используется максимум 100 строк.
+        При `expand` применяется лимит 100, без `expand` — 1000.
         """
         query_template = dict(params or {})
 
@@ -337,7 +315,7 @@ class MySkladClient:
         value: str,
         entity_name: str,
     ) -> str:
-        """Проверяет UUID сущности, полученный из API."""
+        """Проверяет UUID сущности."""
         clean_value = value.strip()
 
         if not UUID_PATTERN.fullmatch(clean_value):
@@ -366,28 +344,20 @@ class MySkladClient:
         self,
         store_id: str,
     ) -> str:
-        """Возвращает название выбранного склада."""
+        """Возвращает название склада."""
         clean_store_id = self._validate_store_id(store_id)
 
         payload = self._request(
             path=f"/entity/store/{clean_store_id}",
         )
 
-        name = str(payload.get("name") or "").strip()
-
-        return name or clean_store_id
+        return str(payload.get("name") or "").strip() or clean_store_id
 
     def finished_stock_by_article(
         self,
         store_id: str,
     ) -> dict[str, int]:
-        """
-        Возвращает физические остатки по артикулам выбранного склада.
-
-        Используется read-only отчёт:
-
-        GET /report/stock/all
-        """
+        """Возвращает физические остатки по артикулам склада."""
         clean_store_id = self._validate_store_id(store_id)
 
         store_href = (
@@ -406,16 +376,14 @@ class MySkladClient:
         stock_by_article: dict[str, float] = {}
 
         for row in rows:
-            article = str(
-                row.get("article") or ""
-            ).strip()
+            article = str(row.get("article") or "").strip()
 
             if not article:
                 continue
 
             if "stock" not in row:
                 raise MySkladApiError(
-                    "МойСклад вернул строку отчёта без поля `stock`."
+                    "МойСклад вернул строку остатков без поля `stock`."
                 )
 
             stock_by_article[article] = (
@@ -429,13 +397,7 @@ class MySkladClient:
         }
 
     def demand_states(self) -> list[dict]:
-        """
-        Возвращает статусы документа «Отгрузка».
-
-        Endpoint:
-
-        GET /entity/demand/metadata
-        """
+        """Возвращает статусы документа «Отгрузка»."""
         metadata = self._request(
             path="/entity/demand/metadata",
         )
@@ -444,7 +406,7 @@ class MySkladClient:
 
         if not isinstance(states, list):
             raise MySkladApiError(
-                "МойСклад вернул метаданные отгрузок без поля `states`."
+                "МойСклад вернул метаданные отгрузок без `states`."
             )
 
         return [
@@ -454,13 +416,7 @@ class MySkladClient:
         ]
 
     def customer_order_states(self) -> list[dict]:
-        """
-        Возвращает статусы документа «Заказ покупателя».
-
-        Endpoint:
-
-        GET /entity/customerorder/metadata
-        """
+        """Возвращает статусы документа «Заказ покупателя»."""
         metadata = self._request(
             path="/entity/customerorder/metadata",
         )
@@ -469,8 +425,7 @@ class MySkladClient:
 
         if not isinstance(states, list):
             raise MySkladApiError(
-                "МойСклад вернул метаданные заказов покупателей "
-                "без поля `states`."
+                "МойСклад вернул метаданные заказов без `states`."
             )
 
         return [
@@ -485,10 +440,9 @@ class MySkladClient:
 
         Endpoint:
 
+        ```text
         GET /entity/productfolder
-
-        Используется для безопасного построения дерева раздела
-        «Готовая продукция» и его вложенных групп.
+        ```
         """
         return self._list_rows(
             path="/entity/productfolder",
@@ -499,11 +453,10 @@ class MySkladClient:
         root_folder_name: str = "Готовая продукция",
     ) -> FinishedProductsScope:
         """
-        Возвращает корневую группу готовой продукции и её потомков.
+        Находит группу готовой продукции и все её дочерние группы.
 
-        Название ищется строго после нормализации пробелов и регистра.
-        Если найдено ноль либо более одной группы, расчёт останавливается:
-        выбирать первую найденную группу небезопасно.
+        При отсутствии или дубликате корневой группы расчёт
+        останавливается, чтобы не включить расходники ошибочно.
         """
         target_name = " ".join(
             str(root_folder_name or "").split()
@@ -515,8 +468,6 @@ class MySkladClient:
             )
 
         folders = self.product_folders()
-
-        normalized_target = target_name.casefold()
         folders_by_id: dict[str, dict] = {}
         matched_ids: list[str] = []
 
@@ -530,8 +481,7 @@ class MySkladClient:
 
             if folder_id in folders_by_id:
                 raise MySkladApiError(
-                    "МойСклад вернул одну товарную группу повторно. "
-                    "Расчёт остановлен, чтобы исключить неоднозначность."
+                    "МойСклад вернул товарную группу повторно."
                 )
 
             folder_name = " ".join(
@@ -545,44 +495,39 @@ class MySkladClient:
 
             folders_by_id[folder_id] = folder
 
-            if folder_name.casefold() == normalized_target:
+            if folder_name.casefold() == target_name.casefold():
                 matched_ids.append(folder_id)
 
         if not matched_ids:
             raise MySkladApiError(
                 "Не найдена товарная группа "
-                f"«{target_name}». Создайте или проверьте этот раздел "
-                "в МоемСкладе. Отчёт не сформирован, чтобы не включить "
+                f"«{target_name}». Расчёт остановлен, чтобы не включить "
                 "расходники."
             )
 
         if len(matched_ids) > 1:
             raise MySkladApiError(
                 "Найдено несколько товарных групп с названием "
-                f"«{target_name}». Переименуйте дублирующиеся группы "
-                "либо оставьте одно однозначное название. "
-                "Отчёт не сформирован."
+                f"«{target_name}». Оставьте одно однозначное название."
             )
 
-        root_id = matched_ids[0]
+        root_folder_id = matched_ids[0]
 
-        children_by_parent_id: dict[str, set[str]] = {}
+        children_by_parent: dict[str, set[str]] = {}
 
         for folder_id, folder in folders_by_id.items():
             parent_id = _entity_id(
                 folder.get("productFolder")
             )
 
-            if not parent_id:
-                continue
-
-            children_by_parent_id.setdefault(
-                parent_id,
-                set(),
-            ).add(folder_id)
+            if parent_id:
+                children_by_parent.setdefault(
+                    parent_id,
+                    set(),
+                ).add(folder_id)
 
         included_ids: set[str] = set()
-        queue = [root_id]
+        queue = [root_folder_id]
 
         while queue:
             current_id = queue.pop()
@@ -592,18 +537,19 @@ class MySkladClient:
 
             included_ids.add(current_id)
 
-            for child_id in children_by_parent_id.get(
-                current_id,
-                set(),
-            ):
-                queue.append(child_id)
+            queue.extend(
+                children_by_parent.get(
+                    current_id,
+                    set(),
+                )
+            )
 
         root_name = str(
-            folders_by_id[root_id].get("name") or target_name
+            folders_by_id[root_folder_id].get("name") or target_name
         ).strip()
 
         return FinishedProductsScope(
-            root_folder_id=root_id,
+            root_folder_id=root_folder_id,
             root_folder_name=root_name,
             included_folder_ids=frozenset(included_ids),
         )
@@ -612,7 +558,7 @@ class MySkladClient:
     def _folder_id_from_product_payload(
         product: object,
     ) -> str:
-        """Возвращает UUID товарной группы из развёрнутого товара."""
+        """Извлекает UUID productFolder из товара."""
         if not isinstance(product, dict):
             return ""
 
@@ -622,7 +568,7 @@ class MySkladClient:
         self,
         product_id: str,
     ) -> str:
-        """Получает UUID товарной группы товара."""
+        """Возвращает товарную группу товара."""
         clean_id = self._validate_uuid(
             value=product_id,
             entity_name="товар",
@@ -637,9 +583,7 @@ class MySkladClient:
             path=f"/entity/product/{clean_id}",
         )
 
-        folder_id = self._folder_id_from_product_payload(
-            product
-        )
+        folder_id = self._folder_id_from_product_payload(product)
 
         self._assortment_folder_cache[cache_key] = folder_id
 
@@ -649,11 +593,7 @@ class MySkladClient:
         self,
         variant_id: str,
     ) -> str:
-        """
-        Получает UUID товарной группы модификации.
-
-        У модификации раздел определяется по её основному товару.
-        """
+        """Возвращает товарную группу модификации по её товару."""
         clean_id = self._validate_uuid(
             value=variant_id,
             entity_name="модификацию товара",
@@ -673,23 +613,17 @@ class MySkladClient:
 
         product = variant.get("product")
 
-        folder_id = self._folder_id_from_product_payload(
-            product
-        )
+        folder_id = self._folder_id_from_product_payload(product)
 
-        if folder_id:
-            self._assortment_folder_cache[cache_key] = folder_id
-            return folder_id
+        if not folder_id:
+            product_id = _entity_id(product)
 
-        product_id = _entity_id(product)
+            if not product_id:
+                raise MySkladApiError(
+                    "МойСклад вернул модификацию без основного товара."
+                )
 
-        if not product_id:
-            raise MySkladApiError(
-                "МойСклад вернул модификацию без основного товара. "
-                "Нельзя безопасно определить её раздел товаров."
-            )
-
-        folder_id = self._product_folder_id(product_id)
+            folder_id = self._product_folder_id(product_id)
 
         self._assortment_folder_cache[cache_key] = folder_id
 
@@ -700,25 +634,24 @@ class MySkladClient:
         assortment: object,
     ) -> str:
         """
-        Возвращает UUID товарной группы `product` или `variant`.
+        Возвращает UUID товарной группы product или variant.
 
-        Метод только читает товар / модификацию, если в уже развёрнутой
-        позиции нет достаточной информации о группе.
+        При недостатке данных в позиции дополнительно получает товар
+        или модификацию через read-only GET.
         """
         if not isinstance(assortment, dict):
             raise MySkladApiError(
-                "МойСклад вернул товарную позицию без номенклатуры."
+                "МойСклад вернул позицию без номенклатуры."
             )
 
         meta = assortment.get("meta")
 
         if not isinstance(meta, dict):
             raise MySkladApiError(
-                "МойСклад вернул номенклатуру без поля `meta`."
+                "МойСклад вернул номенклатуру без `meta`."
             )
 
         assortment_type = str(meta.get("type") or "").strip()
-
         assortment_id = _entity_id(assortment)
 
         if not UUID_PATTERN.fullmatch(assortment_id):
@@ -736,11 +669,13 @@ class MySkladClient:
                 assortment
             )
 
-            if folder_id:
-                self._assortment_folder_cache[cache_key] = folder_id
-                return folder_id
+            if not folder_id:
+                folder_id = self._product_folder_id(
+                    assortment_id
+                )
 
-            return self._product_folder_id(assortment_id)
+            self._assortment_folder_cache[cache_key] = folder_id
+            return folder_id
 
         if assortment_type == "variant":
             product = assortment.get("product")
@@ -749,18 +684,18 @@ class MySkladClient:
                 product
             )
 
-            if folder_id:
-                self._assortment_folder_cache[cache_key] = folder_id
-                return folder_id
+            if not folder_id:
+                product_id = _entity_id(product)
 
-            product_id = _entity_id(product)
+                if product_id:
+                    folder_id = self._product_folder_id(product_id)
+                else:
+                    folder_id = self._variant_folder_id(
+                        assortment_id
+                    )
 
-            if product_id:
-                folder_id = self._product_folder_id(product_id)
-                self._assortment_folder_cache[cache_key] = folder_id
-                return folder_id
-
-            return self._variant_folder_id(assortment_id)
+            self._assortment_folder_cache[cache_key] = folder_id
+            return folder_id
 
         return ""
 
@@ -770,11 +705,13 @@ class MySkladClient:
         date_to: date,
     ) -> list[dict]:
         """
-        Возвращает отгрузки с `moment` в выбранном периоде.
+        Возвращает отгрузки с `moment` в выбранном диапазоне.
 
         Endpoint:
 
+        ```text
         GET /entity/demand
+        ```
         """
         if date_from > date_to:
             raise ValueError(
@@ -806,13 +743,7 @@ class MySkladClient:
         date_from: date,
         date_to: date,
     ) -> list[dict]:
-        """
-        Возвращает заказы покупателей с `moment` в выбранном периоде.
-
-        Endpoint:
-
-        GET /entity/customerorder
-        """
+        """Возвращает заказы покупателей по `moment`."""
         if date_from > date_to:
             raise ValueError(
                 "Дата начала периода не может быть позже даты окончания."
@@ -843,11 +774,13 @@ class MySkladClient:
         customer_order_id: str,
     ) -> dict:
         """
-        Получает заказ покупателя и его связанные отгрузки.
+        Возвращает заказ и список связанных отгрузок.
 
         Endpoint:
 
-        GET /entity/customerorder/{id}
+        ```text
+        GET /entity/customerorder/{id}?expand=demands
+        ```
         """
         clean_id = self._validate_uuid(
             value=customer_order_id,
@@ -866,11 +799,16 @@ class MySkladClient:
         demand_id: str,
     ) -> dict:
         """
-        Получает отгрузку для диагностики связи с заказом.
+        Возвращает отгрузку, связанный заказ и контрагента отгрузки.
 
         Endpoint:
 
-        GET /entity/demand/{id}
+        ```text
+        GET /entity/demand/{id}?expand=customerOrder,agent
+        ```
+
+        `agent` разворачивается намеренно: его название используется
+        исключительно для классификации FBO WB и FBO Ozon.
         """
         clean_id = self._validate_uuid(
             value=demand_id,
@@ -880,7 +818,7 @@ class MySkladClient:
         return self._request(
             path=f"/entity/demand/{clean_id}",
             params={
-                "expand": "customerOrder",
+                "expand": "customerOrder,agent",
             },
         )
 
@@ -889,12 +827,7 @@ class MySkladClient:
         customer_order_id: str,
         expand_assortment: bool = False,
     ) -> list[dict]:
-        """
-        Получает позиции заказа покупателя.
-
-        При `expand_assortment=True` в каждой позиции нужен объект
-        номенклатуры с `article` и, если доступно, `productFolder`.
-        """
+        """Возвращает позиции заказа покупателя."""
         clean_id = self._validate_uuid(
             value=customer_order_id,
             entity_name="заказ покупателя",
@@ -917,12 +850,7 @@ class MySkladClient:
         demand_id: str,
         expand_assortment: bool = False,
     ) -> list[dict]:
-        """
-        Получает позиции отгрузки.
-
-        При `expand_assortment=True` в каждой позиции нужен объект
-        номенклатуры с `article` и, если доступно, `productFolder`.
-        """
+        """Возвращает позиции отгрузки."""
         clean_id = self._validate_uuid(
             value=demand_id,
             entity_name="отгрузку",
